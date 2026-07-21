@@ -234,6 +234,16 @@ impl<T> AsyncConsumer<T> {
         self.ring.ring.prefetch(&mut self.cached_tail)
     }
 
+    /// Load up to `limit` items flushed since the last prefetch. One
+    /// Acquire load. Returns the count of newly prefetched items.
+    ///
+    /// This only extends the local visible window. It does not consume
+    /// items and does not release slots to the producer.
+    #[inline]
+    pub fn prefetch_up_to(&mut self, limit: usize) -> usize {
+        self.ring.ring.prefetch_up_to(&mut self.cached_tail, limit)
+    }
+
     /// Prefetch + pop + release in one call.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
@@ -353,6 +363,34 @@ mod tests {
         p.flush();
         assert_eq!(c.prefetch_and_pop(), Some(1));
         assert_eq!(c.prefetch_and_pop(), Some(2));
+    }
+
+    #[test]
+    fn async_prefetch_up_to_releases_only_popped_items() {
+        let (mut p, mut c) = async_spsc::<u32>(2);
+
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.pop(), Some(10));
+        c.release();
+
+        p.push(30).unwrap();
+        assert_eq!(p.push(40), Err(40));
+
+        assert_eq!(c.pop(), Some(20));
+        c.release();
+
+        p.push(40).unwrap();
+        p.flush();
+
+        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.pop(), Some(30));
+        assert_eq!(c.pop(), Some(40));
+        assert_eq!(c.pop(), None);
+        c.release();
     }
 
     #[test]

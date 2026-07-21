@@ -245,8 +245,8 @@ impl PeerTransmitSlot {
         eq.clear_arena();
         drop(eq);
 
-        self.data_signal.clear();
         self.queued_msgs.store(0, Ordering::Relaxed);
+        self.clear_data_signal_and_rearm();
         let below_lwm = self.is_below_lwm(0, 0);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
         if below_lwm
@@ -283,8 +283,8 @@ impl PeerTransmitSlot {
         drop(eq);
 
         if eq_empty {
-            self.data_signal.clear();
             self.queued_msgs.store(0, Ordering::Relaxed);
+            self.clear_data_signal_and_rearm();
         } else {
             self.data_signal.reschedule();
         }
@@ -330,8 +330,8 @@ impl PeerTransmitSlot {
         }
 
         if eq_empty {
-            self.data_signal.clear();
             self.queued_msgs.store(0, Ordering::Relaxed);
+            self.clear_data_signal_and_rearm();
         }
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
@@ -355,6 +355,11 @@ impl PeerTransmitSlot {
     pub(crate) fn is_empty(&self) -> bool {
         let eq = self.eq.lock().expect("transmit_slot eq poisoned");
         eq.is_empty()
+    }
+
+    fn clear_data_signal_and_rearm(&self) {
+        self.data_signal.clear();
+        self.data_signal.rearm_if_nonempty(self.is_empty());
     }
 
     pub(crate) fn mark_dead(&self) {
@@ -389,9 +394,9 @@ impl PeerTransmitSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{Duration, timeout};
 
-    #[test]
-    fn transmit_slot_caps_queued_messages_independent_of_bytes() {
+    fn test_slot() -> Arc<PeerTransmitSlot> {
         let slot = PeerTransmitSlot::new(
             1,
             false,
@@ -406,6 +411,12 @@ mod tests {
             false,
         );
         slot.handshake_done.store(true, Ordering::Release);
+        slot
+    }
+
+    #[test]
+    fn transmit_slot_caps_queued_messages_independent_of_bytes() {
+        let slot = test_slot();
         let msg = Message::from("x");
 
         for _ in 0..TRANSMIT_SLOT_MSG_CAP_DEFAULT {
@@ -416,5 +427,21 @@ mod tests {
         let mut chunks = Vec::new();
         slot.drain(&mut chunks, 1024);
         assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
+    }
+
+    #[tokio::test]
+    async fn transmit_slot_clear_rearms_when_nonempty() {
+        let slot = test_slot();
+        let msg = Message::from("x");
+
+        assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
+        timeout(Duration::from_secs(1), slot.data_signal.notified())
+            .await
+            .expect("initial encode should notify");
+
+        slot.clear_data_signal_and_rearm();
+        timeout(Duration::from_secs(1), slot.data_signal.notified())
+            .await
+            .expect("nonempty slot should rearm after clear");
     }
 }

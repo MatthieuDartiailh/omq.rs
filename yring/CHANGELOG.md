@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Consumer::prefetch_up_to()` and `AsyncConsumer::prefetch_up_to()` for
+  bounded local prefetch without releasing unpopped items.
+
 ### Changed
 
 - Replace the unreleased 64-bit cursor change with pointer-width cursors

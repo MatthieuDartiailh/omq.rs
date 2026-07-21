@@ -56,6 +56,99 @@ fn push_full_release_retry() {
 }
 
 #[test]
+fn prefetch_up_to_drains_in_bounded_windows() {
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        let mut received = Vec::new();
+        while received.len() < 2 {
+            if c.prefetch_up_to(1) > 0 {
+                if let Some(v) = c.pop() {
+                    received.push(v);
+                }
+                assert_eq!(c.pop(), None);
+                c.release();
+            } else {
+                thread::yield_now();
+            }
+        }
+
+        h.join().unwrap();
+        assert_eq!(received, [10, 20]);
+    });
+}
+
+#[test]
+fn release_after_prefetch_up_to_releases_only_popped_items() {
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, Ordering};
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        let released_one = Arc::new(AtomicBool::new(false));
+        let attempted_second_push = Arc::new(AtomicBool::new(false));
+        let released_one_for_producer = released_one.clone();
+        let attempted_second_push_for_producer = attempted_second_push.clone();
+
+        let h = thread::spawn(move || {
+            while !released_one_for_producer.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+
+            while p.push(30).is_err() {
+                thread::yield_now();
+            }
+            let mut value = match p.push(40) {
+                Ok(()) => panic!("released prefetched-but-unpopped slot"),
+                Err(value) => value,
+            };
+            attempted_second_push_for_producer.store(true, Ordering::Release);
+
+            while let Err(returned) = p.push(value) {
+                value = returned;
+                thread::yield_now();
+            }
+            p.flush();
+        });
+
+        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.pop(), Some(10));
+        c.release();
+        released_one.store(true, Ordering::Release);
+
+        while !attempted_second_push.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        assert_eq!(c.pop(), Some(20));
+        c.release();
+
+        loop {
+            if c.prefetch_up_to(2) > 0 {
+                assert_eq!(c.pop(), Some(30));
+                assert_eq!(c.pop(), Some(40));
+                assert_eq!(c.pop(), None);
+                c.release();
+                break;
+            }
+            thread::yield_now();
+        }
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
 fn producer_drop_flushes() {
     loom::model(|| {
         let (mut p, mut c) = yring::spsc::<u32>(4);
@@ -120,6 +213,42 @@ fn pointer_width_cursor_wrap_boundary() {
         loop {
             if c.prefetch() > 0 {
                 assert_eq!(c.pop(), Some(10));
+                assert_eq!(c.pop(), Some(20));
+                assert_eq!(c.pop(), None);
+                c.release();
+                break;
+            }
+            thread::yield_now();
+        }
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
+fn prefetch_up_to_pointer_width_cursor_wrap_boundary() {
+    loom::model(|| {
+        let base = usize::MAX - 1;
+        let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        loop {
+            if c.prefetch_up_to(1) > 0 {
+                assert_eq!(c.pop(), Some(10));
+                assert_eq!(c.pop(), None);
+                c.release();
+                break;
+            }
+            thread::yield_now();
+        }
+
+        loop {
+            if c.prefetch_up_to(1) > 0 {
                 assert_eq!(c.pop(), Some(20));
                 assert_eq!(c.pop(), None);
                 c.release();

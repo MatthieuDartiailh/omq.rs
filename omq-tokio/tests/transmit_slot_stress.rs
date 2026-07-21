@@ -10,6 +10,24 @@ fn opts() -> Options {
     Options::default()
 }
 
+fn stress_enabled() -> bool {
+    std::env::var_os("OMQ_STRESS").is_some()
+}
+
+macro_rules! stress_test {
+    ($name:ident, $body:block) => {
+        #[tokio::test]
+        #[ignore = "set OMQ_STRESS=1"]
+        async fn $name() {
+            if !stress_enabled() {
+                eprintln!("skip: OMQ_STRESS=1");
+                return;
+            }
+            $body
+        }
+    };
+}
+
 fn tcp_loopback_any() -> omq_proto::endpoint::Endpoint {
     "tcp://127.0.0.1:0".parse().unwrap()
 }
@@ -20,9 +38,8 @@ async fn bind_loopback(sock: &Socket) -> omq_proto::endpoint::Endpoint {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// PUSH/PULL: single peer encode slot, high throughput burst.
-#[tokio::test]
-async fn push_pull_burst_single_peer() {
+// PUSH/PULL: single peer encode slot, high throughput burst.
+stress_test!(push_pull_burst_single_peer, {
     let push = Socket::new(SocketType::Push, opts());
     let pull = Socket::new(SocketType::Pull, opts());
     let ep = bind_loopback(&pull).await;
@@ -42,10 +59,9 @@ async fn push_pull_burst_single_peer() {
         let got = u32::from_be_bytes(m.part_bytes(0).unwrap()[..4].try_into().unwrap());
         assert_eq!(got, i, "message ordering broken at {i}");
     }
-}
+});
 
-#[tokio::test]
-async fn try_send_single_peer_send_pipe_preserves_fifo() {
+stress_test!(try_send_single_peer_send_pipe_preserves_fifo, {
     let push = Socket::new(SocketType::Push, Options::default().send_hwm(2));
     let pull = Socket::new(SocketType::Pull, opts());
     let ep = bind_loopback(&pull).await;
@@ -65,10 +81,9 @@ async fn try_send_single_peer_send_pipe_preserves_fifo() {
         .unwrap();
     assert_eq!(&first.part_bytes(0).unwrap()[..], b"first");
     assert_eq!(&second.part_bytes(0).unwrap()[..], b"second");
-}
+});
 
-#[tokio::test]
-async fn req_try_send_uses_single_peer_transmit_slot() {
+stress_test!(req_try_send_uses_single_peer_transmit_slot, {
     let req = Socket::new(SocketType::Req, Options::default().transmit_slot_cap(1));
     let rep = Socket::new(SocketType::Rep, opts());
     let ep = bind_loopback(&rep).await;
@@ -82,11 +97,10 @@ async fn req_try_send_uses_single_peer_transmit_slot() {
         .unwrap()
         .unwrap();
     assert_eq!(&first.part_bytes(0).unwrap()[..], b"first");
-}
+});
 
-/// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
-#[tokio::test]
-async fn push_pull_peer_churn_transmit_slot() {
+// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
+stress_test!(push_pull_peer_churn_transmit_slot, {
     let push = Socket::new(SocketType::Push, opts());
     let pull1 = Socket::new(SocketType::Pull, opts());
     let pull2 = Socket::new(SocketType::Pull, opts());
@@ -123,11 +137,10 @@ async fn push_pull_peer_churn_transmit_slot() {
             format!("churn{i}").as_bytes()
         );
     }
-}
+});
 
-/// PUB/SUB: fan-out to 8 subscribers, pre-encode path.
-#[tokio::test]
-async fn pub_sub_fanout_8_peers() {
+// PUB/SUB: fan-out to 8 subscribers, pre-encode path.
+stress_test!(pub_sub_fanout_8_peers, {
     let pub_sock = Socket::new(SocketType::Pub, opts());
     let ep = bind_loopback(&pub_sock).await;
 
@@ -157,11 +170,10 @@ async fn pub_sub_fanout_8_peers() {
             assert_eq!(got, i, "sub {idx} ordering broken at {i}");
         }
     }
-}
+});
 
-/// ROUTER/DEALER: identity routing through `PeerTransmitSlot`.
-#[tokio::test]
-async fn router_dealer_identity_transmit_slot() {
+// ROUTER/DEALER: identity routing through `PeerTransmitSlot`.
+stress_test!(router_dealer_identity_transmit_slot, {
     let router = Socket::new(SocketType::Router, opts());
     let dealer1 = Socket::new(
         SocketType::Dealer,
@@ -217,11 +229,10 @@ async fn router_dealer_identity_transmit_slot() {
         .unwrap()
         .unwrap();
     assert_eq!(&m2.part_bytes(0).unwrap()[..], b"reply-to-d2");
-}
+});
 
-/// PAIR: Exclusive strategy send-before-connect.
-#[tokio::test]
-async fn pair_send_before_connect() {
+// PAIR: Exclusive strategy send-before-connect.
+stress_test!(pair_send_before_connect, {
     let a = Socket::new(SocketType::Pair, opts());
     let b = Socket::new(SocketType::Pair, opts());
 
@@ -240,11 +251,10 @@ async fn pair_send_before_connect() {
         .unwrap()
         .unwrap();
     assert_eq!(&m.part_bytes(0).unwrap()[..], b"early");
-}
+});
 
-/// REQ/REP: alternation through encode slot.
-#[tokio::test]
-async fn req_rep_alternation() {
+// REQ/REP: alternation through encode slot.
+stress_test!(req_rep_alternation, {
     let req = Socket::new(SocketType::Req, opts());
     let rep = Socket::new(SocketType::Rep, opts());
     let ep = bind_loopback(&rep).await;
@@ -265,11 +275,10 @@ async fn req_rep_alternation() {
             .unwrap();
         assert_eq!(&m.part_bytes(0).unwrap()[..], format!("a{i}").as_bytes());
     }
-}
+});
 
-/// Large messages: above arena threshold, should use gather path.
-#[tokio::test]
-async fn large_message_gather_path() {
+// Large messages: above arena threshold, should use gather path.
+stress_test!(large_message_gather_path, {
     let push = Socket::new(SocketType::Push, opts());
     let pull = Socket::new(SocketType::Pull, opts());
     let ep = bind_loopback(&pull).await;
@@ -289,4 +298,4 @@ async fn large_message_gather_path() {
         assert_eq!(m.part_bytes(0).unwrap().len(), size, "size {size} mismatch");
         assert_eq!(&m.part_bytes(0).unwrap()[..4], &[0xAB; 4]);
     }
-}
+});

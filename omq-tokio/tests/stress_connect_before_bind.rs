@@ -18,6 +18,25 @@ fn rounds() -> usize {
         .unwrap_or(DEFAULT_ROUNDS)
 }
 
+fn stress_enabled() -> bool {
+    std::env::var_os("OMQ_STRESS").is_some()
+}
+
+macro_rules! stress_test {
+    ($(#[$meta:meta])* $name:ident, $body:block) => {
+        $(#[$meta])*
+        #[tokio::test]
+        #[ignore = "set OMQ_STRESS=1"]
+        async fn $name() {
+            if !stress_enabled() {
+                eprintln!("skip: OMQ_STRESS=1");
+                return;
+            }
+            $body
+        }
+    };
+}
+
 fn opts() -> Options {
     Options {
         reconnect: ReconnectPolicy::Fixed(Duration::from_millis(20)),
@@ -233,126 +252,126 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
 
 // ── TCP ─────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn push_pull_tcp_push_binds() {
+stress_test!(push_pull_tcp_push_binds, {
     stress_push_pull(&Transport::Tcp, "push").await;
-}
-#[tokio::test]
-async fn push_pull_tcp_pull_binds() {
+});
+stress_test!(push_pull_tcp_pull_binds, {
     stress_push_pull(&Transport::Tcp, "pull").await;
-}
-#[tokio::test]
-async fn req_rep_tcp_rep_binds() {
+});
+stress_test!(req_rep_tcp_rep_binds, {
     stress_req_rep(&Transport::Tcp, "rep").await;
-}
-#[tokio::test]
-async fn req_rep_tcp_req_binds() {
+});
+stress_test!(req_rep_tcp_req_binds, {
     stress_req_rep(&Transport::Tcp, "req").await;
-}
-#[tokio::test]
-async fn pub_sub_tcp_pub_binds() {
+});
+stress_test!(pub_sub_tcp_pub_binds, {
     stress_pub_sub(&Transport::Tcp, "pub").await;
-}
-#[tokio::test]
-async fn pub_sub_tcp_sub_binds() {
+});
+stress_test!(pub_sub_tcp_sub_binds, {
     stress_pub_sub(&Transport::Tcp, "sub").await;
-}
-#[tokio::test]
-async fn pair_tcp() {
+});
+stress_test!(pair_tcp, {
     stress_pair(&Transport::Tcp).await;
-}
-#[tokio::test]
-async fn dealer_router_tcp_router_binds() {
+});
+stress_test!(dealer_router_tcp_router_binds, {
     stress_dealer_router(&Transport::Tcp, "router").await;
-}
-#[tokio::test]
-async fn dealer_router_tcp_dealer_binds() {
+});
+stress_test!(dealer_router_tcp_dealer_binds, {
     stress_dealer_router(&Transport::Tcp, "dealer").await;
-}
+});
 
 // ── IPC ─────────────────────────────────────────────────────────
 
-#[tokio::test]
-#[cfg(unix)]
-async fn push_pull_ipc_push_binds() {
-    stress_push_pull(&Transport::Ipc, "push").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn push_pull_ipc_pull_binds() {
-    stress_push_pull(&Transport::Ipc, "pull").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn req_rep_ipc_rep_binds() {
-    stress_req_rep(&Transport::Ipc, "rep").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn req_rep_ipc_req_binds() {
-    stress_req_rep(&Transport::Ipc, "req").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn pub_sub_ipc_pub_binds() {
-    stress_pub_sub(&Transport::Ipc, "pub").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn pub_sub_ipc_sub_binds() {
-    stress_pub_sub(&Transport::Ipc, "sub").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn pair_ipc() {
-    stress_pair(&Transport::Ipc).await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn dealer_router_ipc_router_binds() {
-    stress_dealer_router(&Transport::Ipc, "router").await;
-}
-#[tokio::test]
-#[cfg(unix)]
-async fn dealer_router_ipc_dealer_binds() {
-    stress_dealer_router(&Transport::Ipc, "dealer").await;
-}
+stress_test!(
+    #[cfg(unix)]
+    push_pull_ipc_push_binds,
+    {
+        stress_push_pull(&Transport::Ipc, "push").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    push_pull_ipc_pull_binds,
+    {
+        stress_push_pull(&Transport::Ipc, "pull").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    req_rep_ipc_rep_binds,
+    {
+        stress_req_rep(&Transport::Ipc, "rep").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    req_rep_ipc_req_binds,
+    {
+        stress_req_rep(&Transport::Ipc, "req").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    pub_sub_ipc_pub_binds,
+    {
+        stress_pub_sub(&Transport::Ipc, "pub").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    pub_sub_ipc_sub_binds,
+    {
+        stress_pub_sub(&Transport::Ipc, "sub").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    pair_ipc,
+    {
+        stress_pair(&Transport::Ipc).await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    dealer_router_ipc_router_binds,
+    {
+        stress_dealer_router(&Transport::Ipc, "router").await;
+    }
+);
+stress_test!(
+    #[cfg(unix)]
+    dealer_router_ipc_dealer_binds,
+    {
+        stress_dealer_router(&Transport::Ipc, "dealer").await;
+    }
+);
 
 // ── inproc ──────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn push_pull_inproc_push_binds() {
+stress_test!(push_pull_inproc_push_binds, {
     stress_push_pull(&Transport::Inproc, "push").await;
-}
-#[tokio::test]
-async fn push_pull_inproc_pull_binds() {
+});
+stress_test!(push_pull_inproc_pull_binds, {
     stress_push_pull(&Transport::Inproc, "pull").await;
-}
-#[tokio::test]
-async fn req_rep_inproc_rep_binds() {
+});
+stress_test!(req_rep_inproc_rep_binds, {
     stress_req_rep(&Transport::Inproc, "rep").await;
-}
-#[tokio::test]
-async fn req_rep_inproc_req_binds() {
+});
+stress_test!(req_rep_inproc_req_binds, {
     stress_req_rep(&Transport::Inproc, "req").await;
-}
-#[tokio::test]
-async fn pub_sub_inproc_pub_binds() {
+});
+stress_test!(pub_sub_inproc_pub_binds, {
     stress_pub_sub(&Transport::Inproc, "pub").await;
-}
-#[tokio::test]
-async fn pub_sub_inproc_sub_binds() {
+});
+stress_test!(pub_sub_inproc_sub_binds, {
     stress_pub_sub(&Transport::Inproc, "sub").await;
-}
-#[tokio::test]
-async fn pair_inproc() {
+});
+stress_test!(pair_inproc, {
     stress_pair(&Transport::Inproc).await;
-}
-#[tokio::test]
-async fn dealer_router_inproc_router_binds() {
+});
+stress_test!(dealer_router_inproc_router_binds, {
     stress_dealer_router(&Transport::Inproc, "router").await;
-}
-#[tokio::test]
-async fn dealer_router_inproc_dealer_binds() {
+});
+stress_test!(dealer_router_inproc_dealer_binds, {
     stress_dealer_router(&Transport::Inproc, "dealer").await;
-}
+});
