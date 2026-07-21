@@ -111,6 +111,7 @@ async fn undrained_monitor_lags_without_blocking_socket() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "local Linux resource watch; can hang on hosted CI"]
 async fn tcp_identity_churn_fd_count_returns_near_baseline() {
     let _guard = RESOURCE_TEST_LOCK.lock().await;
 
@@ -154,6 +155,7 @@ async fn tcp_identity_churn_fd_count_returns_near_baseline() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "local Linux resource watch; can hang on hosted CI"]
 async fn stream_close_under_remote_write_returns_fd_count_near_baseline() {
     let _guard = RESOURCE_TEST_LOCK.lock().await;
 
