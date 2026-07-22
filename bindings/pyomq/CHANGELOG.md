@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-07-22
+
+### Added
+
+- `proxy()` and `proxy_steerable()` APIs backed by the native tokio proxy,
+  including capture and control sockets.
+
+### Fixed
+
+- Native proxy blocking mode preserves multipart messages under
+  backpressure instead of dropping later frames from the same message.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.19.2, `omq-proto` to 0.23.1, and
+  `yring` to 0.3.9.
+
+### Performance
+
+- Refresh pyomq charts and proxy throughput measurements.
+
 ## [0.16.1] - 2026-07-19
 
 ### Fixed

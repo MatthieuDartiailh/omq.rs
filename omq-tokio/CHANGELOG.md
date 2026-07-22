@@ -7,10 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-07-22
+
+### Added
+
+- `Proxy` helper for async message forwarding, with capture socket support
+  and steerable `PAUSE`/`RESUME`/`TERMINATE`/`KILL` control.
+
 ### Changed
 
 - 32-bit Linux targets with native 64-bit atomics are supported. Per-frame and
   per-message payloads remain bounded by platform allocation limits.
+
+### Fixed
+
+- PUSH fallback handoff and reactivation after peers appear.
+- PUSH/PULL wakeups with bounded prefetch.
+- Direct TCP write remainder flushing on partial writes.
+- Socket close honors linger before driver shutdown.
+- Reconnect and duplicate TCP connect tests now wait on handshakes instead of
+  timing races.
+
+### Performance
+
+- Reduce idle TCP peer memory.
+- Start TCP read buffers at 4 KiB and grow them under sustained larger reads.
+- Map fan-out workers to IO lanes and restore PUB/SUB fast-path performance.
 
 ### Removed
 
