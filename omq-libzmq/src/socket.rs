@@ -170,8 +170,11 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     // average size. Rounded up to a power of two internally.
     let byte_ring_cap = capacity * 1024;
     let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_notify);
-    *sender.bypass_send.get() = Some(bsend);
-    *receiver.bypass_recv.get() = Some(brecv);
+    // SAFETY: bypass setup happens from bind/connect plumbing and must not
+    // bind either socket's later app-facing owner thread.
+    *unsafe { sender.bypass_send.get_unchecked() } = Some(bsend);
+    // SAFETY: same setup phase as above.
+    *unsafe { receiver.bypass_recv.get_unchecked() } = Some(brecv);
 }
 
 /// Register an inproc bind. If there are pending connectors, install
@@ -318,7 +321,9 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     let cap = recv_hwm.max(16);
     let (fast_prod, fast_cons) = yring::spsc(cap);
     let (mut pump_prod, pump_cons) = yring::spsc(cap);
-    *sock.recv_cons.get() = Some(RecvConsumers {
+    // SAFETY: materialization happens before user recv access and must not
+    // bind the later app-facing owner thread.
+    *unsafe { sock.recv_cons.get_unchecked() } = Some(RecvConsumers {
         fast: fast_cons,
         pump: pump_cons,
     });
@@ -385,12 +390,17 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if let Some(h) = arc.recv_pump.get() {
         h.abort();
     }
-    *arc.bypass_send.get() = None;
-    *arc.bypass_recv.get() = None;
+    // SAFETY: `zmq_close` reclaims the socket pointer, so no later user access
+    // can legally race this cleanup.
+    *unsafe { arc.bypass_send.get_unchecked() } = None;
+    // SAFETY: same close-time exclusive ownership as above.
+    *unsafe { arc.bypass_recv.get_unchecked() } = None;
     let linger = arc
         .overlay
         .lock()
-        .map_or(Some(std::time::Duration::ZERO), |overlay| overlay.linger);
+        .map_or(Some(std::time::Duration::ZERO), |overlay| {
+            overlay.effective_linger()
+        });
     let close_socket = arc.inner.get().map(|inner| inner.as_ref().clone());
 
     // Enter the tokio runtime context so that dropping OmqSocket (and

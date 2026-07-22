@@ -39,19 +39,18 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            let has_buffered = sock
+            let drain_nonempty = sock
                 .drain_nonempty
-                .load(std::sync::atomic::Ordering::Relaxed)
-                || sock
-                    .recv_cons
-                    .get()
-                    .as_ref()
-                    .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty())
-                || sock
-                    .bypass_recv
-                    .get()
-                    .as_ref()
-                    .is_some_and(|br| !br.is_empty());
+                .load(std::sync::atomic::Ordering::Relaxed);
+            // SAFETY: libzmq sockets are accessed by at most one application thread.
+            let recv_cons_has_data = unsafe { sock.recv_cons.get() }
+                .as_ref()
+                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
+            // SAFETY: same socket-thread invariant as above.
+            let bypass_recv_has_data = unsafe { sock.bypass_recv.get() }
+                .as_ref()
+                .is_some_and(|br| !br.is_empty());
+            let has_buffered = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }
@@ -80,7 +79,8 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);
 
-            let cons_ptr = &*sock.recv_cons.get();
+            // SAFETY: libzmq sockets are accessed by at most one application thread.
+            let cons_ptr = &*unsafe { sock.recv_cons.get() };
             let recv_cons_has_data = cons_ptr
                 .as_ref()
                 .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());

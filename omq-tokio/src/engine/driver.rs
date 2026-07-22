@@ -902,8 +902,6 @@ where
                         transmit_slot.as_ref().unwrap(), &mut drain_buf,
                         &mut arena_buf, &mut writer,
                     ).await?;
-                    if latency_profile {
-                    }
                 }
 
                 // Handshake deadline; disabled once handshake completes.

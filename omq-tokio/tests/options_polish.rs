@@ -7,6 +7,10 @@ use std::time::Duration;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType, TrySendError};
 
+fn max_message_size_for_payload(payload_len: usize) -> usize {
+    payload_len + std::mem::size_of::<omq_tokio::message::Payload>()
+}
+
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
@@ -67,7 +71,10 @@ async fn router_mandatory_true_errors_on_unknown() {
 #[tokio::test]
 async fn max_message_size_rejects_oversize() {
     let ep = inproc_ep("opt-mms");
-    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    let pull = Socket::new(
+        SocketType::Pull,
+        Options::default().max_message_size(max_message_size_for_payload(8)),
+    );
     pull.bind(ep.clone()).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -96,7 +103,10 @@ async fn max_message_size_rejects_oversize_when_receiver_connects_inproc() {
     let push = Socket::new(SocketType::Push, Options::default());
     push.bind(ep.clone()).await.unwrap();
 
-    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    let pull = Socket::new(
+        SocketType::Pull,
+        Options::default().max_message_size(max_message_size_for_payload(8)),
+    );
     pull.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -244,7 +254,10 @@ async fn drop_oldest_keeps_newest_messages() {
 #[tokio::test]
 async fn max_message_size_exactly_at_limit_is_accepted() {
     let ep = inproc_ep("opt-mms-exact");
-    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    let pull = Socket::new(
+        SocketType::Pull,
+        Options::default().max_message_size(max_message_size_for_payload(8)),
+    );
     pull.bind(ep.clone()).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -261,7 +274,10 @@ async fn max_message_size_exactly_at_limit_is_accepted() {
 
 #[tokio::test]
 async fn max_message_size_one_byte_over_drops_connection() {
-    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    let pull = Socket::new(
+        SocketType::Pull,
+        Options::default().max_message_size(max_message_size_for_payload(8)),
+    );
     let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -275,4 +291,20 @@ async fn max_message_size_one_byte_over_drops_connection() {
         r.is_err(),
         "9-byte message must not be delivered when limit is 8"
     );
+}
+
+#[tokio::test]
+async fn max_message_size_counts_part_overhead_inproc() {
+    let ep = inproc_ep("opt-mms-overhead-inproc");
+    let max = std::mem::size_of::<omq_tokio::message::Payload>();
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(max));
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    push.send(Message::single("x")).await.unwrap();
+    let r = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await;
+    assert!(r.is_err(), "message overhead must count against the limit");
 }

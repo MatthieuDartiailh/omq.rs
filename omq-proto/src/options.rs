@@ -62,7 +62,8 @@ pub struct Options {
     /// Max time allowed to complete the ZMTP handshake.
     pub handshake_timeout: Option<Duration>,
 
-    /// Reject incoming messages larger than this. `None` = no limit.
+    /// Reject incoming messages larger than this. Accounting includes payload
+    /// bytes plus one internal payload slot per part. `None` = no limit.
     pub max_message_size: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to
@@ -714,6 +715,13 @@ mod tests {
         assert!(!o.router_mandatory);
         assert_eq!(o.on_mute, OnMute::Block);
         assert_eq!(o.large_message_threshold, Some(128 * 1024));
+    }
+
+    #[test]
+    fn native_default_linger_is_zero() {
+        // Native OMQ intentionally differs from libzmq here: async socket
+        // close should not wait forever unless the user asks for it.
+        assert_eq!(Options::default().linger, Some(Duration::ZERO));
     }
 
     #[test]

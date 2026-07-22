@@ -20,7 +20,8 @@ fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
 /// Clear a bypass option if the peer has closed the pipe.
 ///
 fn clear_stale_bypass<B: HasPipeClosed>(bypass_cell: &crate::local_cell::LocalCell<Option<B>>) {
-    let opt = bypass_cell.get();
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let opt = unsafe { bypass_cell.get() };
     if opt
         .as_ref()
         .is_some_and(|b| b.pipe_closed().load(std::sync::atomic::Ordering::Acquire))
@@ -72,8 +73,10 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
     }
 
     clear_stale_bypass(&sock.bypass_recv);
-    if let Some(bypass) = sock.bypass_recv.get() {
-        if let Some(cons) = sock.recv_cons.get()
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    if let Some(bypass) = unsafe { sock.bypass_recv.get() } {
+        // SAFETY: same socket-thread invariant as above.
+        if let Some(cons) = unsafe { sock.recv_cons.get() }
             && let Some(m) = try_pop_dual(cons, sock)
         {
             signal_recv_space(sock);
@@ -91,7 +94,8 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
         return Ok(None);
     }
 
-    let Some(cons) = sock.recv_cons.get() else {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
         return Err(ETERM);
     };
     if let Some(m) = try_pop_dual(cons, sock) {
@@ -112,7 +116,8 @@ pub(crate) fn try_send_message(
 ) -> Result<SendMessageAttempt, c_int> {
     if msg.len() == 1 {
         clear_stale_bypass(&sock.bypass_send);
-        if let Some(bypass) = sock.bypass_send.get() {
+        // SAFETY: libzmq sockets are accessed by at most one application thread.
+        if let Some(bypass) = unsafe { sock.bypass_send.get() } {
             let result = {
                 let data = msg.get(0).unwrap_or(&[]);
                 bypass.push(data)
@@ -297,15 +302,15 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     // Inproc bypass: write raw bytes into the byte ring.
     // Checked BEFORE Message construction to avoid heap allocation.
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
     if flags & ZMQ_SNDMORE == 0 {
-        // SAFETY: zmq contract guarantees single-threaded access per socket.
-        let accum = sock.send_accum.get();
+        // SAFETY: libzmq sockets are accessed by at most one application thread.
+        let accum = unsafe { sock.send_accum.get() };
         if accum.is_empty() {
             clear_stale_bypass(&sock.bypass_send);
         }
         if accum.is_empty()
-            && let Some(bypass) = sock.bypass_send.get()
+            // SAFETY: same socket-thread invariant as `send_accum`.
+            && let Some(bypass) = unsafe { sock.bypass_send.get() }
         {
             let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
             let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
@@ -322,8 +327,8 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         }
     }
 
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
-    let accum = sock.send_accum.get();
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let accum = unsafe { sock.send_accum.get() };
 
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
@@ -460,9 +465,9 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
 
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
     clear_stale_bypass(&sock.bypass_recv);
-    if let Some(bypass) = sock.bypass_recv.get() {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    if let Some(bypass) = unsafe { sock.bypass_recv.get() } {
         match recv_bypass_direct(sock, bypass, buf, buf_len, flags) {
             Ok(n) => return n,
             Err(e) => return fail(e),
@@ -477,8 +482,8 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     // Fast path: pop Message from yring, borrow first frame directly.
     // Avoids the Bytes::copy_from_slice that pop_recv_frame/decompose_message
     // would do for inline messages.
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
-    let Some(cons) = sock.recv_cons.get() else {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
         return fail(ETERM);
     };
 
@@ -575,13 +580,14 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     // Inproc bypass path: peek from byte ring, wrap in Bytes.
     // Used by zmq_msg_recv (which needs an owned Bytes).
     // zmq_recv uses recv_bypass_direct instead (zero alloc).
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
     clear_stale_bypass(&sock.bypass_recv);
-    if let Some(bypass) = sock.bypass_recv.get() {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    if let Some(bypass) = unsafe { sock.bypass_recv.get() } {
         // Drain yring first (messages from before bypass was installed,
         // or multipart messages that went through the regular tokio path
         // because the send-side bypass was skipped for SNDMORE batches).
-        if let Some(cons) = sock.recv_cons.get()
+        // SAFETY: same socket-thread invariant as above.
+        if let Some(cons) = unsafe { sock.recv_cons.get() }
             && let Some(m) = try_pop_dual(cons, sock)
         {
             signal_recv_space(sock);
@@ -602,8 +608,8 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         // rather than the bypass ring.
     }
 
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
-    let Some(cons) = sock.recv_cons.get() else {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
         return Err(ETERM);
     };
 
@@ -653,8 +659,8 @@ fn recv_bypass_direct(
     }
 
     // Drain yring first (multipart messages that went through omq-tokio).
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
-    if let Some(cons) = sock.recv_cons.get()
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    if let Some(cons) = unsafe { sock.recv_cons.get() }
         && let Some(m) = try_pop_dual(cons, sock)
     {
         signal_recv_space(sock);
@@ -700,8 +706,8 @@ fn try_recv_bypass_or_yring(
         bypass.advance(len);
         return checked_c_int_len(len).map(Some);
     }
-    // SAFETY: zmq contract guarantees single-threaded access per socket.
-    if let Some(cons) = sock.recv_cons.get()
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    if let Some(cons) = unsafe { sock.recv_cons.get() }
         && let Some(m) = try_pop_dual(cons, sock)
     {
         signal_recv_space(sock);

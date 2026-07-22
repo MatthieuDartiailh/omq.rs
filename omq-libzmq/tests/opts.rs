@@ -136,6 +136,8 @@ fn linger_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
+    assert_eq!(get_i32(s, ZMQ_LINGER), -1);
+
     set_i32(s, ZMQ_LINGER, 100);
     assert_eq!(get_i32(s, ZMQ_LINGER), 100);
 
@@ -147,6 +149,40 @@ fn linger_roundtrip() {
 
     zmq_close(s);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn explicit_linger_zero_close_after_connect_without_peer_does_not_hang() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(push, ZMQ_LINGER), -1);
+    assert_eq!(set_i32(push, ZMQ_LINGER, 0), 0);
+    assert_eq!(get_i32(push, ZMQ_LINGER), 0);
+
+    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(push, std::ptr::null(), 0, 0), 0);
+
+    // Regression for rust-zmq #382: a queued send to an unconnected peer
+    // must not make close/term hang when the user explicitly disables linger.
+    let close_start = Instant::now();
+    assert_eq!(zmq_close(push), 0);
+    assert!(
+        close_start.elapsed() < Duration::from_millis(100),
+        "zmq_close blocked with explicit linger=0"
+    );
+
+    let term_start = Instant::now();
+    assert_eq!(zmq_ctx_term(ctx), 0);
+    assert!(
+        term_start.elapsed() < Duration::from_millis(500),
+        "zmq_ctx_term blocked with explicit linger=0"
+    );
 }
 
 #[test]
