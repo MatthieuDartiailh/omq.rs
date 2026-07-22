@@ -406,6 +406,16 @@ impl Message {
         }
     }
 
+    /// Size charged against [`Options::max_message_size`](crate::Options::max_message_size).
+    ///
+    /// This includes payload bytes plus one internal payload slot per part.
+    /// Counting the slot keeps multi-part and zero-length frame floods bounded
+    /// consistently across ZMTP and inproc transports.
+    pub fn max_message_size_len(&self) -> usize {
+        self.byte_len()
+            .saturating_add(self.len().saturating_mul(std::mem::size_of::<Payload>()))
+    }
+
     /// Whether this is a multi-part message (more than one frame).
     pub fn is_multipart(&self) -> bool {
         matches!(

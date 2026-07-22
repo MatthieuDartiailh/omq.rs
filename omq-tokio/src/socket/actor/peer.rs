@@ -590,7 +590,7 @@ pub(super) async fn inproc_peer_driver(
                 frame = in_rx.recv() => match frame {
                     Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
-                            && m.byte_len() > max
+                            && m.max_message_size_len() > max
                         {
                             return;
                         }

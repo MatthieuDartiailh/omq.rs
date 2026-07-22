@@ -62,7 +62,8 @@ pub struct Options {
     /// Max time allowed to complete the ZMTP handshake.
     pub handshake_timeout: Option<Duration>,
 
-    /// Reject incoming messages larger than this. `None` = no limit.
+    /// Reject incoming messages larger than this. Accounting includes payload
+    /// bytes plus one internal payload slot per part. `None` = no limit.
     pub max_message_size: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to

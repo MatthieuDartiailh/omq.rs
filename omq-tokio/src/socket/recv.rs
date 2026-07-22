@@ -804,7 +804,7 @@ impl SpscAwareRecv {
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
-                .is_some_and(|max| msg.byte_len() > max)
+                .is_some_and(|max| msg.max_message_size_len() > max)
         {
             return SpscPush::Unavailable(msg);
         }
@@ -835,7 +835,7 @@ impl SpscAwareRecv {
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
-                .is_some_and(|max| msg.byte_len() > max)
+                .is_some_and(|max| msg.max_message_size_len() > max)
             || pair.producer.is_consumer_dropped()
         {
             return false;
@@ -855,7 +855,7 @@ impl SpscAwareRecv {
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
-                .is_some_and(|max| msg.byte_len() > max)
+                .is_some_and(|max| msg.max_message_size_len() > max)
             || pair.producer.is_consumer_dropped()
         {
             return false;
@@ -870,7 +870,7 @@ impl SpscAwareRecv {
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
-                .is_some_and(|max| msg.byte_len() > max)
+                .is_some_and(|max| msg.max_message_size_len() > max)
             || pair.producer.is_consumer_dropped()
         {
             return false;
