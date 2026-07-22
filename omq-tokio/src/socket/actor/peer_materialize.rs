@@ -39,16 +39,16 @@ pub(super) fn spawn_byte_stream_connection(
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
-    let has_encoder = MessageEncoder::for_endpoint(&endpoint, &socket.options);
-    let has_transform = has_encoder.is_some();
+    let transforms = MessageEncoder::for_endpoint(&endpoint, &socket.options);
+    let has_transforms = transforms.is_some();
     let latency_profile = workload_profile == WorkloadProfile::Latency
         && !socket.options.mechanism.has_frame_transform();
     let Ok((stream, direct_tcp_writer)) =
-        split_direct_tcp_writer(socket, stream, &endpoint, latency_profile, has_transform)
+        split_direct_tcp_writer(socket, stream, &endpoint, latency_profile, has_transforms)
     else {
         return;
     };
-    let passthrough_info = has_encoder
+    let passthrough_info = transforms
         .as_ref()
         .and_then(|(enc, _)| enc.passthrough_info())
         .map(|(s, t)| (s.clone(), t));
@@ -68,7 +68,7 @@ pub(super) fn spawn_byte_stream_connection(
             socket.socket_type,
         ),
     );
-    let peer_driver = attach_transforms(socket, peer_driver, has_encoder);
+    let peer_driver = attach_transforms(socket, peer_driver, transforms);
     let peer_driver = match socket.send_strategy.shared_rx() {
         Some(rx) => peer_driver.with_shared_rx(rx),
         None => peer_driver,
@@ -78,7 +78,7 @@ pub(super) fn spawn_byte_stream_connection(
     let transmit_slot = build_transmit_slot(
         socket,
         peer_id,
-        has_transform,
+        has_transforms,
         passthrough_info,
         arena,
         #[cfg(feature = "ws")]
@@ -303,7 +303,7 @@ fn split_direct_tcp_writer(
     stream: AnyStream,
     endpoint: &Endpoint,
     latency_profile: bool,
-    has_transform: bool,
+    has_transforms: bool,
 ) -> Result<
     (
         AnyStream,
@@ -314,7 +314,7 @@ fn split_direct_tcp_writer(
     if !latency_profile
         || !matches!(socket.socket_type, SocketType::Req | SocketType::Rep)
         || !matches!(endpoint, Endpoint::Tcp { .. })
-        || has_transform
+        || has_transforms
     {
         return Ok((stream, None));
     }
@@ -336,12 +336,12 @@ fn split_direct_tcp_writer(
 fn attach_transforms(
     socket: &mut SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
-    encoder: Option<(
+    transforms: Option<(
         omq_proto::proto::transform::MessageEncoder,
         omq_proto::proto::transform::MessageDecoder,
     )>,
 ) -> ConnectionDriver<AnyStream> {
-    let Some((enc, dec)) = encoder else {
+    let Some((enc, dec)) = transforms else {
         return peer_driver;
     };
     let mut peer_driver = peer_driver.with_encoder(enc).with_decoder(dec);
@@ -385,7 +385,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
 fn build_transmit_slot(
     socket: &SocketDriver,
     peer_id: u64,
-    has_transform: bool,
+    has_transforms: bool,
     passthrough_info: Option<(bytes::Bytes, usize)>,
     arena: ArenaConfig,
     #[cfg(feature = "ws")] is_ws: bool,
@@ -402,7 +402,7 @@ fn build_transmit_slot(
     let transmit_slot_msg_cap = socket.options.send_hwm.max(1) as usize;
     Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
         peer_id,
-        has_transform,
+        has_transforms,
         passthrough_info,
         arena.threshold,
         arena.cap,
