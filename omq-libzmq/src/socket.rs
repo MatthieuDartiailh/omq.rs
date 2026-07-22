@@ -390,7 +390,9 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     let linger = arc
         .overlay
         .lock()
-        .map_or(Some(std::time::Duration::ZERO), |overlay| overlay.linger);
+        .map_or(Some(std::time::Duration::ZERO), |overlay| {
+            overlay.effective_linger()
+        });
     let close_socket = arc.inner.get().map(|inner| inner.as_ref().clone());
 
     // Enter the tokio runtime context so that dropping OmqSocket (and

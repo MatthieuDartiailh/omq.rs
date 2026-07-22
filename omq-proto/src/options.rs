@@ -717,6 +717,13 @@ mod tests {
     }
 
     #[test]
+    fn native_default_linger_is_zero() {
+        // Native OMQ intentionally differs from libzmq here: async socket
+        // close should not wait forever unless the user asks for it.
+        assert_eq!(Options::default().linger, Some(Duration::ZERO));
+    }
+
+    #[test]
     fn large_message_threshold_setters() {
         assert_eq!(
             Options::new()

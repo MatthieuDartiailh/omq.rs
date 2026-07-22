@@ -32,7 +32,7 @@ macro_rules! lock_overlay {
 pub(crate) struct SocketOverlay {
     pub send_hwm: Option<u32>,
     pub recv_hwm: Option<u32>,
-    pub linger: Option<Duration>,
+    pub linger: LingerSetting,
     pub identity: Bytes,
     pub router_mandatory: bool,
     pub reconnect_ivl: Option<Duration>,
@@ -81,7 +81,29 @@ pub(crate) enum MechanismOverlay {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum LingerSetting {
+    #[default]
+    Unset,
+    Forever,
+    Finite(Duration),
+}
+
 impl SocketOverlay {
+    pub(crate) fn effective_linger(&self) -> Option<Duration> {
+        match self.linger {
+            LingerSetting::Unset | LingerSetting::Forever => None,
+            LingerSetting::Finite(d) => Some(d),
+        }
+    }
+
+    fn linger_ms(&self) -> i32 {
+        match self.linger {
+            LingerSetting::Unset | LingerSetting::Forever => -1,
+            LingerSetting::Finite(d) => d.as_millis() as i32,
+        }
+    }
+
     pub(crate) fn to_options(&self) -> omq_tokio::Options {
         let keepalive = match self.tcp_keepalive {
             1 => KeepAlive::Enabled {
@@ -135,7 +157,7 @@ impl SocketOverlay {
         omq_tokio::Options {
             send_hwm: self.send_hwm.unwrap_or(DEFAULT_HWM as u32),
             recv_hwm: self.recv_hwm.unwrap_or(DEFAULT_HWM as u32),
-            linger: self.linger,
+            linger: self.effective_linger(),
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
             router_mandatory: self.router_mandatory,
@@ -340,9 +362,9 @@ pub extern "C" fn zmq_setsockopt(
                 return fail(libc::EINVAL);
             };
             lock_overlay!(sock_arc).linger = if v < 0 {
-                None
+                LingerSetting::Forever
             } else {
-                Some(Duration::from_millis(v as u64))
+                LingerSetting::Finite(Duration::from_millis(v as u64))
             };
         }
         ZMQ_IDENTITY => {
@@ -807,9 +829,7 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_LINGER => {
-            let v = lock_overlay!(sock_arc)
-                .linger
-                .map_or(-1, |d| d.as_millis() as i32);
+            let v = lock_overlay!(sock_arc).linger_ms();
             write_i32(optval, optvallen, v)
         }
         ZMQ_IDENTITY => {
@@ -1304,6 +1324,27 @@ mod tests {
             overlay.to_options().handshake_timeout,
             Some(Duration::from_millis(10))
         );
+    }
+
+    #[test]
+    fn default_linger_matches_libzmq_forever() {
+        let overlay = SocketOverlay::default();
+
+        assert_eq!(overlay.linger_ms(), -1);
+        assert_eq!(overlay.effective_linger(), None);
+        assert_eq!(overlay.to_options().linger, None);
+    }
+
+    #[test]
+    fn explicit_linger_zero_maps_to_native_zero() {
+        let overlay = SocketOverlay {
+            linger: LingerSetting::Finite(Duration::ZERO),
+            ..Default::default()
+        };
+
+        assert_eq!(overlay.linger_ms(), 0);
+        assert_eq!(overlay.effective_linger(), Some(Duration::ZERO));
+        assert_eq!(overlay.to_options().linger, Some(Duration::ZERO));
     }
 
     #[test]
