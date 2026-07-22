@@ -612,7 +612,8 @@ pub extern "C" fn zmq_msg_send(
     };
 
     if !group.is_empty() {
-        let accum = sock_arc.send_accum.get();
+        // SAFETY: libzmq sockets are accessed by at most one application thread.
+        let accum = unsafe { sock_arc.send_accum.get() };
         accum.push(group);
     }
 
