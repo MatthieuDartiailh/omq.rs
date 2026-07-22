@@ -502,7 +502,7 @@ pub fn proxy_handles(
     be: omq_tokio::blocking::Socket,
     cap: Option<omq_tokio::blocking::Socket>,
     ctrl: Option<omq_tokio::blocking::Socket>,
-) {
+) -> omq_proto::error::Result<omq_tokio::proxy::ProxyExit> {
     let mut proxy = omq_tokio::Proxy::new(fe.into_async(), be.into_async());
     if let Some(cap) = cap {
         proxy = proxy.capture(cap.into_async());
@@ -510,9 +510,7 @@ pub fn proxy_handles(
     if let Some(ctrl) = ctrl {
         proxy = proxy.control(ctrl.into_async());
     }
-    ctx.spawn_blocking(async move {
-        let _ = proxy.run().await;
-    });
+    ctx.spawn_blocking(async move { proxy.run().await })
 }
 
 #[allow(dead_code)]

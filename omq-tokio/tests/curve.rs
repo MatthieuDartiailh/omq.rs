@@ -405,8 +405,9 @@ async fn curve_reconnects_after_server_restart() {
             ..Options::default().curve_client(client_kp, server_pub)
         },
     );
+    let mut client_mon = client.monitor();
     client.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake_on(&mut client_mon).await;
 
     client.send(Message::single("before")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), server1.recv())
@@ -429,8 +430,9 @@ async fn curve_reconnects_after_server_restart() {
     }
     assert!(bound, "server2 failed to bind after server1 closed");
 
+    test_support::wait_for_handshake_on(&mut client_mon).await;
     client.send(Message::single("after")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(3), server2.recv())
+    let m = tokio::time::timeout(Duration::from_secs(5), server2.recv())
         .await
         .expect("second recv timed out — CURVE reconnect failed")
         .unwrap();

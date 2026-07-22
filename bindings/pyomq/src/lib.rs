@@ -120,7 +120,8 @@ fn native_proxy(
         .map(|inner| inner.ensure_blocking_socket())
         .transpose()?;
     let ctx = fe.ctx.clone();
-    py.detach(|| runtime::proxy_handles(&ctx, fe_sock, be_sock, cap_sock, ctrl_sock));
+    py.detach(|| runtime::proxy_handles(&ctx, fe_sock, be_sock, cap_sock, ctrl_sock))
+        .map_err(error::map_err)?;
     Ok(())
 }
 

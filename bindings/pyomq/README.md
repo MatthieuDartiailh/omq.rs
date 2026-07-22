@@ -78,15 +78,15 @@ See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) fo
 <!-- PROXY_PERF:START -->
 |                    | pyomq     | pyzmq     | ratio     |
 |--------------------|----------:|----------:|----------:|
-| PUSH/PULL msg/s    |  2.81 M/s |  1.53 M/s | **1.83×** |
-| REQ/REP rt/s       |   8,411/s |   4,511/s | **1.86×** |
+| PUSH/PULL msg/s    |  2.75 M/s |  1.53 M/s | **1.79×** |
+| REQ/REP rt/s       |   8,441/s |   4,511/s | **1.87×** |
 <!-- PROXY_PERF:END -->
 
 pyomq's `proxy()` forwards directly between sockets on the tokio runtime,
 no Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's
 C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is
-~1.3x faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip);
-pyomq is ~1.8x faster thanks to direct socket forwarding.
+~1.8x faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip);
+pyomq is ~1.9x faster thanks to direct socket forwarding.
 
 Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure, regenerate the chart, and update the proxy table.
 

@@ -59,17 +59,13 @@ async fn push_duplicate_tcp_connect_weights_round_robin() {
         .await
         .expect("push did not keep three pipes");
 
-    let drain_a = tokio::spawn(async move { drain_until_idle(pull_a).await });
-    let drain_b = tokio::spawn(async move { drain_until_idle(pull_b).await });
-
     for i in 0..N {
         push.send(Message::single(format!("weighted-{i}")))
             .await
             .unwrap();
     }
 
-    let count_a = drain_a.await.unwrap();
-    let count_b = drain_b.await.unwrap();
+    let (count_a, count_b) = drain_pair_until_total(pull_a, pull_b, N).await;
 
     assert_eq!(count_a + count_b, N, "every message must arrive");
     assert_eq!(
@@ -82,12 +78,34 @@ async fn push_duplicate_tcp_connect_weights_round_robin() {
     );
 }
 
-async fn drain_until_idle(socket: Socket) -> usize {
-    let mut count = 0;
-    while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), socket.recv()).await {
-        count += 1;
+async fn drain_pair_until_total(a: Socket, b: Socket, total: usize) -> (usize, usize) {
+    let mut count_a = 0;
+    let mut count_b = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let timeout = tokio::time::sleep_until(deadline);
+    tokio::pin!(timeout);
+
+    while count_a + count_b < total {
+        tokio::select! {
+            biased;
+            () = &mut timeout => {
+                panic!(
+                    "timed out draining duplicate connect distribution: \
+                     count_a={count_a}, count_b={count_b}, total={total}"
+                );
+            }
+            msg = a.recv() => {
+                msg.unwrap();
+                count_a += 1;
+            }
+            msg = b.recv() => {
+                msg.unwrap();
+                count_b += 1;
+            }
+        }
     }
-    count
+
+    (count_a, count_b)
 }
 
 #[tokio::test]
