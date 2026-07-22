@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-07-22
+
+### Added
+
+- CURVE authentication callbacks now receive `PeerInfo.identity`, exposing
+  the peer routing identity from READY metadata.
+
+### Fixed
+
+- Python CURVE authenticators can now bind an authenticated client public key
+  to the ROUTER identity frame seen by application code.
+- The `compression_auto_train` overlay default now matches the documented
+  off-by-default behavior.
+
 ## [0.16.2] - 2026-07-22
 
 ### Added
