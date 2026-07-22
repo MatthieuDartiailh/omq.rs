@@ -226,16 +226,13 @@ impl FallbackReceiver {
     /// Async pop. Waits until a message is available or the queue is closed.
     pub(crate) async fn recv(&self) -> Option<Message> {
         loop {
-            let notified = self.inner.data_signal.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
             if let Some(msg) = self.try_pop() {
                 return Some(msg);
             }
             if self.inner.queue.is_closed() && self.inner.queue.is_empty() {
                 return None;
             }
-            notified.await;
+            self.inner.data_signal.ready().await;
         }
     }
 }

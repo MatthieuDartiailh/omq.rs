@@ -88,6 +88,10 @@ impl SendPipeProducer {
         self.producer.is_empty()
     }
 
+    pub(crate) fn is_below_lwm(&self) -> bool {
+        self.producer.len() <= self.producer.capacity() / SEND_PIPE_LWM_DIVISOR
+    }
+
     pub(crate) fn space_available(&self) -> Arc<Notify> {
         self.space_available.clone()
     }
@@ -102,7 +106,7 @@ impl Drop for SendPipeProducer {
 
 impl SendPipeConsumer {
     pub(crate) async fn notified(&self) {
-        self.data_signal.notified().await;
+        self.data_signal.ready().await;
     }
 
     pub(crate) fn drain_into(
@@ -140,6 +144,8 @@ impl SendPipeConsumer {
             && self.above_lwm.swap(false, Ordering::AcqRel)
         {
             self.space_available.notify_waiters();
+            // Store a permit for senders that start waiting after this drain.
+            self.space_available.notify_one();
         }
     }
 }

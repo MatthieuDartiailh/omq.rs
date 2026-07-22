@@ -81,6 +81,21 @@ impl DataSignal {
         self.notify.notify_waiters();
     }
 
+    /// Wait until data is marked pending.
+    ///
+    /// This remains ready after a previous `Notified` future was woken
+    /// and then dropped by a `select!` branch losing the race.
+    pub(crate) async fn ready(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.pending.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+
+    #[cfg(test)]
     pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
         self.notify.notified()
     }
@@ -173,5 +188,19 @@ mod tests {
         for h in handles {
             assert!(h.await.unwrap().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn ready_observes_pending_after_cancelled_waiter() {
+        let sig = DataSignal::new();
+        let mut notified = Box::pin(sig.notified());
+        notified.as_mut().enable();
+
+        sig.mark();
+        drop(notified);
+
+        timeout(Duration::from_secs(1), sig.ready())
+            .await
+            .expect("pending flag should keep readiness visible");
     }
 }

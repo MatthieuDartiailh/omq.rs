@@ -95,9 +95,15 @@ impl ActivePipes {
         };
         let i = self.inactive_cursor % len;
         self.inactive_cursor = (i + 1) % len;
-        if self.inactive[i].tx.above_lwm.load(Ordering::Acquire) {
+        if self.inactive[i].tx.above_lwm.load(Ordering::Acquire)
+            && !self.inactive[i].tx.is_below_lwm()
+        {
             return;
         }
+        self.inactive[i]
+            .tx
+            .above_lwm
+            .store(false, Ordering::Release);
         let pipe = self.inactive.remove(i);
         self.active.push(pipe);
         if self.inactive.is_empty() {
@@ -527,6 +533,29 @@ mod tests {
 
         assert_eq!(pipes.inactive.len(), 0);
         assert!(pipes.active.iter().any(|pipe| pipe.peer_id == 0));
+    }
+
+    #[test]
+    fn inactive_pipe_rechecks_occupancy_when_lwm_flag_is_stale() {
+        let (mut tx, mut rx) = send_pipe(2);
+        tx.try_send(Message::single("a")).unwrap();
+        tx.try_send(Message::single("b")).unwrap();
+
+        let mut batch = Vec::new();
+        assert_eq!(rx.drain_into(&mut batch, 2, usize::MAX), 2);
+
+        // Models producer observing Full and setting above_lwm after the
+        // consumer already drained below LWM, so no space wake fires.
+        tx.above_lwm
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut pipes = ActivePipes::default();
+        pipes.inactive.push(ActivePipe { peer_id: 0, tx });
+        pipes.try_reactivate_when_empty();
+
+        assert_eq!(pipes.inactive.len(), 0);
+        assert_eq!(pipes.active.len(), 1);
+        assert_eq!(pipes.active[0].peer_id, 0);
     }
 
     #[tokio::test]

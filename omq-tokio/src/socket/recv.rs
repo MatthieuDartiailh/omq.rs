@@ -726,10 +726,6 @@ impl SpscAwareRecv {
             pipe.as_mut().enable();
 
             if self.consumer_generation.load(Ordering::Acquire) > 0 {
-                let notified = self.recv_notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-
                 match self.try_drain() {
                     DrainResult::Message(msg) => return Ok(msg),
                     DrainResult::Closed => return Err(Error::Closed),
@@ -738,7 +734,7 @@ impl SpscAwareRecv {
 
                 tokio::select! {
                     biased;
-                    () = notified => continue,
+                    () = self.recv_notify.ready() => continue,
                     () = &mut pipe => continue,
                     () = self.activated.notified() => continue,
                 }

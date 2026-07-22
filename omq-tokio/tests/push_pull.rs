@@ -12,6 +12,23 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
+const STRESS_CHANNEL_CAPACITY: usize = 32;
+const STRESS_BATCH: u32 = 2048;
+const STRESS_PAYLOAD_BYTES: usize = 28;
+const STRESS_SOCKET_HWM: u32 = 32;
+
+fn encode_stress_message(id: u32, payload: &[u8]) -> Message {
+    let mut buf = Vec::with_capacity(4 + payload.len());
+    buf.extend_from_slice(&id.to_be_bytes());
+    buf.extend_from_slice(payload);
+    Message::from_slice(&buf)
+}
+
+fn decode_stress_message(msg: &Message) -> u32 {
+    let bytes = msg.part_bytes(0).expect("frame");
+    u32::from_be_bytes(bytes[0..4].try_into().unwrap())
+}
+
 #[tokio::test]
 async fn push_duplicate_tcp_connect_keeps_separate_pipes() {
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -165,6 +182,91 @@ async fn push_tcp_single_pull_preserves_startup_order() {
         let push = sender.await.unwrap();
         push.close().await.unwrap();
         pull.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "set OMQ_STRESS=1"]
+async fn push_pull_persistent_actor_loop_does_not_stall() {
+    if std::env::var_os("OMQ_STRESS").is_none() {
+        eprintln!("skip: OMQ_STRESS=1");
+        return;
+    }
+
+    let iterations = std::env::var("OMQ_PUSH_PULL_STRESS_ITERS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(5_000);
+
+    let opts = Options::new()
+        .send_hwm(STRESS_SOCKET_HWM)
+        .recv_hwm(STRESS_SOCKET_HWM);
+    let pull = Socket::new(SocketType::Pull, opts.clone());
+    let port = test_support::bind_loopback(&pull).await;
+
+    let push = Socket::new(SocketType::Push, opts);
+    push.connect(test_support::tcp_loopback(port))
+        .await
+        .expect("push connect");
+
+    let (pull_tx, pull_rx) = tokio::sync::mpsc::channel(STRESS_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        while let Ok(msg) = pull.recv().await {
+            if pull_tx.send(decode_stress_message(&msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let (push_tx, mut push_rx) =
+        tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(STRESS_CHANNEL_CAPACITY);
+    let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel(STRESS_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        while let Some((id, payload)) = push_rx.recv().await {
+            if writer_tx
+                .send(encode_stress_message(id, &payload))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(msg) = writer_rx.recv().await {
+            push.send(msg).await.expect("send");
+        }
+    });
+
+    let mut pull_rx = Some(pull_rx);
+    for iteration in 0..iterations {
+        let payload = vec![0xAB; STRESS_PAYLOAD_BYTES];
+        let send = {
+            let push_tx = push_tx.clone();
+            tokio::spawn(async move {
+                for i in 0..STRESS_BATCH {
+                    push_tx
+                        .send((i, payload.clone()))
+                        .await
+                        .expect("push channel");
+                }
+            })
+        };
+        let mut pull_rx_owned = pull_rx.take().unwrap();
+        let recv = tokio::spawn(async move {
+            for expected in 0..STRESS_BATCH {
+                let got = pull_rx_owned.recv().await.expect("pull channel");
+                assert_eq!(got, expected, "iteration {iteration}: message reordered");
+            }
+            pull_rx_owned
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            send.await.expect("sender task");
+            pull_rx.replace(recv.await.expect("receiver task"));
+        })
+        .await
+        .unwrap_or_else(|_| panic!("iteration {iteration}: push/pull stalled"));
     }
 }
 

@@ -231,12 +231,8 @@ impl std::fmt::Debug for YringSink {
 
 impl YringSink {
     fn flush_and_signal(&mut self) {
-        if let yring::FlushResult::Flushed {
-            was_empty: true, ..
-        } = self.producer.flush_and_check()
-        {
-            (self.signal)();
-        }
+        self.producer.flush();
+        (self.signal)();
     }
 }
 
@@ -301,12 +297,8 @@ impl RecvSink {
                     }
                     // Field-level borrows: notified holds sink.space,
                     // but producer and signal are disjoint fields.
-                    if let yring::FlushResult::Flushed {
-                        was_empty: true, ..
-                    } = sink.producer.flush_and_check()
-                    {
-                        (sink.signal)();
-                    }
+                    sink.producer.flush();
+                    (sink.signal)();
                     return true;
                 }
             }
@@ -894,7 +886,7 @@ where
                 // reply can cause an unnecessary zero-time reactor poll
                 // before the next request is written.
                 () = async {
-                    transmit_slot.as_ref().unwrap().data_signal.notified().await;
+                    transmit_slot.as_ref().unwrap().data_signal.ready().await;
                 }, if latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
@@ -992,7 +984,7 @@ where
                 // into the per-peer PeerTransmitSlot. Drain and write
                 // directly, bypassing the local FrameBuffer.
                 () = async {
-                    transmit_slot.as_ref().unwrap().data_signal.notified().await;
+                    transmit_slot.as_ref().unwrap().data_signal.ready().await;
                 }, if !latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
@@ -1792,6 +1784,33 @@ mod tests {
             assert!(budget.exhausted());
             assert_eq!(profile.time(16), None);
         }
+    }
+
+    #[test]
+    fn yring_sink_signals_every_flush_even_when_nonempty() {
+        let (producer, _consumer) = yring::spsc(4);
+        let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let signals_for_sink = signals.clone();
+        let mut sink = YringSink {
+            producer,
+            signal: Box::new(move || {
+                signals_for_sink.fetch_add(1, Ordering::Relaxed);
+            }),
+            space: Arc::new(tokio::sync::Notify::new()),
+        };
+
+        assert!(matches!(
+            sink.producer.push(RecvItem::new(Message::single("a"))),
+            Ok(())
+        ));
+        sink.flush_and_signal();
+        assert!(matches!(
+            sink.producer.push(RecvItem::new(Message::single("b"))),
+            Ok(())
+        ));
+        sink.flush_and_signal();
+
+        assert_eq!(signals.load(Ordering::Relaxed), 2);
     }
 
     /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out

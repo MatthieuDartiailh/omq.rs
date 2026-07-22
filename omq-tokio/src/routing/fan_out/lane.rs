@@ -485,7 +485,7 @@ impl LaneWorker {
             }
             tokio::select! {
                 () = self.ctrl_notify.notified() => {}
-                () = self.data_signal.notified() => {}
+                () = self.data_signal.ready() => {}
             }
         }
     }

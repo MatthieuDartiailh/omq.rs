@@ -321,6 +321,7 @@ fi
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_STRESS:-}" == "1" ]]; then
     run omq_cargo_with_rust_tools test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored
+    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_push_pull -- --ignored
     run omq_cargo_with_rust_tools test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
 else
     echo "skip: OMQ_STRESS=1"
