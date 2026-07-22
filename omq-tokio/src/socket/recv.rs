@@ -10,7 +10,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 
-use crate::engine::signal::DataSignal;
+use crate::engine::signal::{DataSignal, StateSignal};
 use crate::transport::inproc::{InprocRx, InprocTx};
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
@@ -24,7 +24,7 @@ pub(crate) type SpscRecvNotify = Arc<DataSignal>;
 
 /// Notified by the actor when the consumers Vec changes. Wakes
 /// any `recv()` that's blocked so it re-drains with the updated list.
-pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
+pub(crate) type SpscActivated = Arc<StateSignal>;
 
 const RECV_BATCH_MESSAGES: usize = 256;
 const RECV_BATCH_BYTES: usize = 2 * 1024 * 1024;
@@ -79,7 +79,7 @@ impl RecvItem {
 }
 
 /// Waker for blocking `recv()`. IO threads call `wake()` alongside
-/// `tokio::sync::Notify::notify_one()`. The blocking user thread
+/// the async data signal. The blocking user thread
 /// parks via `std::thread::park()` and is woken by `unpark()`.
 pub(crate) struct BlockingRecvWaker {
     registered: AtomicBool,
@@ -135,7 +135,7 @@ pub(crate) enum SpscPush {
     Unavailable(Message),
     Full {
         msg: Message,
-        space: Arc<tokio::sync::Notify>,
+        space: Arc<StateSignal>,
     },
 }
 
@@ -144,7 +144,7 @@ pub(crate) enum SpscPush {
 pub(crate) struct TcpYringConsumer {
     pub consumer: Mutex<yring::Consumer<RecvItem>>,
     pub batch_remaining: AtomicUsize,
-    pub space: Arc<tokio::sync::Notify>,
+    pub space: Arc<StateSignal>,
     pub peer_id: u64,
 }
 
@@ -169,11 +169,11 @@ pub(crate) type TcpConsumers = Arc<RwLock<Vec<Arc<TcpYringConsumer>>>>;
 /// ([`SpscAwareRecv`]) owns the `yring::Consumer` and drains it.
 ///
 /// Zero heap allocations on both sides. The yring is pre-allocated at
-/// construction; `tokio::sync::Notify` uses intrusive waiters.
+/// construction. Data and space wakeups go through stateful signals.
 pub(crate) struct SharedRecvPipe {
     producer: Mutex<yring::Producer<RecvItem>>,
-    notify: Arc<tokio::sync::Notify>,
-    space: Arc<tokio::sync::Notify>,
+    notify: Arc<DataSignal>,
+    space: Arc<StateSignal>,
     closed: AtomicBool,
     blocking_waker: Arc<BlockingRecvWaker>,
 }
@@ -191,9 +191,9 @@ impl SharedRecvPipe {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let mut item = RecvItem::new(msg);
         loop {
-            let space_notified = self.space.notified();
-            tokio::pin!(space_notified);
-            space_notified.as_mut().enable();
+            let seen = self.space.generation();
+            let space_changed = self.space.changed_after(seen);
+            tokio::pin!(space_changed);
 
             {
                 let mut prod = self.producer.lock().unwrap();
@@ -204,7 +204,7 @@ impl SharedRecvPipe {
                     Ok(()) => {
                         prod.flush();
                         drop(prod);
-                        self.notify.notify_one();
+                        self.notify.mark();
                         self.blocking_waker.wake();
                         return Ok(());
                     }
@@ -213,7 +213,7 @@ impl SharedRecvPipe {
                     }
                 }
             }
-            space_notified.await;
+            space_changed.await;
         }
     }
 
@@ -224,8 +224,8 @@ impl SharedRecvPipe {
         if let Ok(mut prod) = self.producer.lock() {
             prod.close();
         }
-        self.notify.notify_waiters();
-        self.space.notify_waiters();
+        self.notify.wake_all();
+        self.space.notify_changed();
         self.blocking_waker.wake();
     }
 }
@@ -235,8 +235,8 @@ impl Drop for SharedRecvPipe {
         if !*self.closed.get_mut() {
             self.producer.get_mut().unwrap().close();
         }
-        self.notify.notify_waiters();
-        self.space.notify_waiters();
+        self.notify.wake_all();
+        self.space.notify_changed();
         self.blocking_waker.wake();
     }
 }
@@ -253,12 +253,12 @@ pub(crate) fn recv_pipe(
 ) -> (
     Arc<SharedRecvPipe>,
     yring::Consumer<RecvItem>,
-    Arc<tokio::sync::Notify>,
-    Arc<tokio::sync::Notify>,
+    Arc<DataSignal>,
+    Arc<StateSignal>,
 ) {
     let (prod, cons) = yring::spsc(capacity);
-    let notify = Arc::new(tokio::sync::Notify::new());
-    let space = Arc::new(tokio::sync::Notify::new());
+    let notify = Arc::new(DataSignal::new());
+    let space = Arc::new(StateSignal::new());
     let pipe = Arc::new(SharedRecvPipe {
         producer: Mutex::new(prod),
         notify: notify.clone(),
@@ -293,7 +293,7 @@ impl SpscHandles {
             send_ring: Arc::new(ArcSwapOption::empty()),
             send_ring_available: Arc::new(AtomicBool::new(false)),
             recv_notify: Arc::new(DataSignal::new()),
-            activated: Arc::new(tokio::sync::Notify::new()),
+            activated: Arc::new(StateSignal::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
             blocking_recv_waker,
         }
@@ -322,9 +322,9 @@ pub(crate) struct SpscAwareRecv {
     /// common TCP/no-inproc path.
     send_ring_available: Arc<AtomicBool>,
     /// Data arrival signal from the shared recv pipe.
-    recv_pipe_notify: Arc<tokio::sync::Notify>,
+    recv_pipe_notify: Arc<DataSignal>,
     /// Space-available signal for the shared recv pipe.
-    recv_pipe_space: Arc<tokio::sync::Notify>,
+    recv_pipe_space: Arc<StateSignal>,
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
     drain_state: Mutex<DrainState>,
@@ -393,7 +393,7 @@ fn drain_peer_source(
             batch,
             budget,
             || {
-                peer.space_notify.notify_waiters();
+                peer.space_notify.notify_changed();
                 peer.blocking_space.notify();
             },
         ),
@@ -403,7 +403,7 @@ fn drain_peer_source(
             latency,
             batch,
             budget,
-            || peer.space.notify_one(),
+            || peer.space.notify_changed(),
         ),
     }
 }
@@ -485,8 +485,8 @@ fn drain_yring_one(
 impl SpscAwareRecv {
     pub(crate) fn new(
         recv_consumer: yring::Consumer<RecvItem>,
-        recv_pipe_notify: Arc<tokio::sync::Notify>,
-        recv_pipe_space: Arc<tokio::sync::Notify>,
+        recv_pipe_notify: Arc<DataSignal>,
+        recv_pipe_space: Arc<StateSignal>,
         handles: SpscHandles,
         latency: bool,
     ) -> Self {
@@ -559,6 +559,8 @@ impl SpscAwareRecv {
             return DrainResult::Message(msg);
         }
 
+        self.recv_notify.begin_drain();
+        self.recv_pipe_notify.begin_drain();
         self.refresh_snapshot(&mut guard);
 
         let state = &mut *guard;
@@ -570,14 +572,14 @@ impl SpscAwareRecv {
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
-        if result.is_none() && Self::state_is_empty(state) {
-            self.recv_notify.clear();
-            if self
-                .recv_notify
-                .rearm_if_nonempty(Self::state_is_empty(state))
-            {
-                self.blocking_recv_waker.wake();
-            }
+        if result.is_none()
+            && Self::state_is_empty(state)
+            && (self.recv_notify.clear_after(Self::state_is_empty(state))
+                || self
+                    .recv_pipe_notify
+                    .clear_after(state.recv_consumer.is_empty()))
+        {
+            self.blocking_recv_waker.wake();
         }
         drop(guard);
 
@@ -663,7 +665,7 @@ impl SpscAwareRecv {
             let (item, released) =
                 drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch_remaining);
             if released {
-                self.recv_pipe_space.notify_waiters();
+                self.recv_pipe_space.notify_changed();
             }
             SourceDrain {
                 message: item.map(RecvItem::into_message),
@@ -677,7 +679,7 @@ impl SpscAwareRecv {
                 budget,
             );
             if drained > 0 {
-                self.recv_pipe_space.notify_waiters();
+                self.recv_pipe_space.notify_changed();
             }
             SourceDrain::default()
         }
@@ -721,9 +723,13 @@ impl SpscAwareRecv {
                 DrainResult::Empty => {}
             }
 
-            let pipe = self.recv_pipe_notify.notified();
-            tokio::pin!(pipe);
-            pipe.as_mut().enable();
+            let recv_ready = self.recv_notify.ready();
+            let pipe_ready = self.recv_pipe_notify.ready();
+            let activated_seen = self.activated.generation();
+            let activated = self.activated.changed_after(activated_seen);
+            tokio::pin!(recv_ready);
+            tokio::pin!(pipe_ready);
+            tokio::pin!(activated);
 
             if self.consumer_generation.load(Ordering::Acquire) > 0 {
                 match self.try_drain() {
@@ -734,9 +740,9 @@ impl SpscAwareRecv {
 
                 tokio::select! {
                     biased;
-                    () = self.recv_notify.ready() => continue,
-                    () = &mut pipe => continue,
-                    () = self.activated.notified() => continue,
+                    () = &mut recv_ready => continue,
+                    () = &mut pipe_ready => continue,
+                    () = &mut activated => continue,
                 }
             } else {
                 match self.try_drain() {
@@ -745,14 +751,10 @@ impl SpscAwareRecv {
                     DrainResult::Empty => {}
                 }
 
-                let activated = self.activated.notified();
-                tokio::pin!(activated);
-                activated.as_mut().enable();
-
                 tokio::select! {
                     biased;
-                    () = &mut pipe => continue,
-                    () = activated => continue,
+                    () = &mut pipe_ready => continue,
+                    () = &mut activated => continue,
                 }
             }
         }
@@ -781,12 +783,12 @@ impl SpscAwareRecv {
         self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
         if let Some(pair) = self.send_ring.load_full() {
-            pair.space_notify.notify_waiters();
+            pair.space_notify.notify_changed();
             pair.blocking_space.notify();
         }
         self.send_ring_available.store(false, Ordering::Release);
         self.send_ring.store(None);
-        self.recv_pipe_space.notify_waiters();
+        self.recv_pipe_space.notify_changed();
     }
 
     pub(crate) fn try_push_spsc_or_full(&self, msg: Message) -> SpscPush {
@@ -860,9 +862,9 @@ impl SpscAwareRecv {
             return true;
         }
 
-        let notified = pair.space_notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        let seen = pair.space_notify.generation();
+        let changed = pair.space_notify.changed_after(seen);
+        tokio::pin!(changed);
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
@@ -872,7 +874,7 @@ impl SpscAwareRecv {
             return false;
         }
         if pair.producer.is_full() {
-            notified.await;
+            changed.await;
         }
         true
     }

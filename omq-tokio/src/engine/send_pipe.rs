@@ -1,11 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Notify;
-
 use omq_proto::message::Message;
 
-use super::signal::DataSignal;
+use super::signal::{DataSignal, StateSignal};
 
 pub(crate) type SendPipeProducerHandle = Arc<Mutex<Option<SendPipeProducer>>>;
 
@@ -25,7 +23,7 @@ pub(crate) enum SendPipeError {
 pub(crate) struct SendPipeProducer {
     producer: yring::Producer<Message>,
     data_signal: Arc<DataSignal>,
-    space_available: Arc<Notify>,
+    space_available: Arc<StateSignal>,
     pub(crate) above_lwm: Arc<AtomicBool>,
 }
 
@@ -34,14 +32,14 @@ pub(crate) struct SendPipeProducer {
 pub(crate) struct SendPipeConsumer {
     consumer: yring::Consumer<Message>,
     data_signal: Arc<DataSignal>,
-    space_available: Arc<Notify>,
+    space_available: Arc<StateSignal>,
     above_lwm: Arc<AtomicBool>,
 }
 
 pub(crate) fn send_pipe(capacity: usize) -> (SendPipeProducer, SendPipeConsumer) {
     let (producer, consumer) = yring::spsc(capacity.max(1));
     let data_signal = Arc::new(DataSignal::new());
-    let space_available = Arc::new(Notify::new());
+    let space_available = Arc::new(StateSignal::new());
     let above_lwm = Arc::new(AtomicBool::new(false));
     (
         SendPipeProducer {
@@ -92,7 +90,7 @@ impl SendPipeProducer {
         self.producer.len() <= self.producer.capacity() / SEND_PIPE_LWM_DIVISOR
     }
 
-    pub(crate) fn space_available(&self) -> Arc<Notify> {
+    pub(crate) fn space_available(&self) -> Arc<StateSignal> {
         self.space_available.clone()
     }
 }
@@ -101,11 +99,12 @@ impl Drop for SendPipeProducer {
     fn drop(&mut self) {
         self.producer.close();
         self.data_signal.wake_all();
+        self.space_available.notify_changed();
     }
 }
 
 impl SendPipeConsumer {
-    pub(crate) async fn notified(&self) {
+    pub(crate) async fn ready(&self) {
         self.data_signal.ready().await;
     }
 
@@ -115,6 +114,7 @@ impl SendPipeConsumer {
         max_msgs: usize,
         max_bytes: usize,
     ) -> usize {
+        self.data_signal.begin_drain();
         self.consumer.prefetch();
         let mut count = 0usize;
         let mut bytes = 0usize;
@@ -130,8 +130,7 @@ impl SendPipeConsumer {
             self.consumer.release();
             self.signal_space_if_below_lwm();
         }
-        self.data_signal.clear();
-        self.data_signal.rearm_if_nonempty(self.consumer.is_empty());
+        self.data_signal.clear_after(self.consumer.is_empty());
         count
     }
 
@@ -143,9 +142,7 @@ impl SendPipeConsumer {
         if self.consumer.len() <= self.consumer.capacity() / SEND_PIPE_LWM_DIVISOR
             && self.above_lwm.swap(false, Ordering::AcqRel)
         {
-            self.space_available.notify_waiters();
-            // Store a permit for senders that start waiting after this drain.
-            self.space_available.notify_one();
+            self.space_available.notify_changed();
         }
     }
 }
@@ -153,7 +150,7 @@ impl SendPipeConsumer {
 impl Drop for SendPipeConsumer {
     fn drop(&mut self) {
         self.consumer.close();
-        self.space_available.notify_waiters();
+        self.space_available.notify_changed();
     }
 }
 
@@ -169,14 +166,14 @@ mod tests {
         tx.try_send(Message::single("a")).unwrap();
         tx.try_send(Message::single("b")).unwrap();
 
-        timeout(Duration::from_secs(1), rx.notified())
+        timeout(Duration::from_secs(1), rx.ready())
             .await
             .expect("first send should notify");
 
         let mut batch = Vec::new();
         assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
 
-        timeout(Duration::from_secs(1), rx.notified())
+        timeout(Duration::from_secs(1), rx.ready())
             .await
             .expect("partial drain should rearm");
 
@@ -184,7 +181,7 @@ mod tests {
         assert_eq!(batch.len(), 2);
 
         assert!(
-            timeout(Duration::from_millis(10), rx.notified())
+            timeout(Duration::from_millis(10), rx.ready())
                 .await
                 .is_err()
         );

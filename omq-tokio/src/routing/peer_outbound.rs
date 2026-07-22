@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use tokio::sync::Notify;
 
+use crate::engine::signal::StateSignal;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::engine::{PeerDriverCommand, PeerDriverHandle};
 use omq_proto::message::Message;
@@ -67,7 +67,7 @@ impl PeerOutbound {
         }
     }
 
-    pub(crate) fn space_available(&self) -> Option<Arc<Notify>> {
+    pub(crate) fn space_available(&self) -> Option<Arc<StateSignal>> {
         match self {
             Self::Wire { slot, .. } => Some(slot.space_available.clone()),
             Self::Inbox(_) => None,

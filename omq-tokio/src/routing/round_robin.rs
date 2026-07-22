@@ -10,8 +10,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Notify;
-
+use crate::engine::signal::StateSignal;
 use crate::engine::{PeerDriverHandle, SendPipeError, SendPipeProducer};
 use omq_proto::error::Result;
 use omq_proto::message::Message;
@@ -57,10 +56,10 @@ impl Default for ActivePipes {
 impl ActivePipes {
     fn clear(&mut self) {
         for pipe in &self.active {
-            pipe.tx.space_available().notify_waiters();
+            pipe.tx.space_available().notify_changed();
         }
         for pipe in &self.inactive {
-            pipe.tx.space_available().notify_waiters();
+            pipe.tx.space_available().notify_changed();
         }
         self.active.clear();
         self.inactive.clear();
@@ -167,7 +166,7 @@ impl ActivePipes {
 pub(crate) struct Submitter {
     queue: FallbackQueue,
     active: Arc<Mutex<ActivePipes>>,
-    active_changed: Arc<Notify>,
+    active_changed: Arc<StateSignal>,
 }
 
 impl Submitter {
@@ -175,7 +174,7 @@ impl Submitter {
         self.queue.shutdown();
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
-        self.active_changed.notify_waiters();
+        self.active_changed.notify_changed();
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -204,12 +203,12 @@ impl Submitter {
                 if self.queue.is_closed() {
                     return Err(omq_proto::error::Error::Closed);
                 }
-                let queue_space = self.queue.space_notified();
-                let active_changed = self.active_changed.notified();
+                let queue_seen = self.queue.space_generation();
+                let active_seen = self.active_changed.generation();
+                let queue_space = self.queue.wait_space_changed_after(queue_seen);
+                let active_changed = self.active_changed.changed_after(active_seen);
                 tokio::pin!(queue_space);
                 tokio::pin!(active_changed);
-                queue_space.as_mut().enable();
-                active_changed.as_mut().enable();
 
                 match self.try_send(msg) {
                     Ok(()) => return Ok(()),
@@ -229,9 +228,9 @@ impl Submitter {
                 continue;
             };
 
-            let notified = space_available.notified();
+            let seen = space_available.generation();
+            let notified = space_available.changed_after(seen);
             tokio::pin!(notified);
-            notified.as_mut().enable();
             match self.try_send(msg) {
                 Ok(()) => return Ok(()),
                 Err(omq_proto::error::TrySendError::Full(returned)) => {
@@ -260,12 +259,12 @@ impl Submitter {
             if self.queue.is_closed() {
                 return;
             }
-            let queue_space = self.queue.space_notified();
-            let active_changed = self.active_changed.notified();
+            let queue_seen = self.queue.space_generation();
+            let active_seen = self.active_changed.generation();
+            let queue_space = self.queue.wait_space_changed_after(queue_seen);
+            let active_changed = self.active_changed.changed_after(active_seen);
             tokio::pin!(queue_space);
             tokio::pin!(active_changed);
-            queue_space.as_mut().enable();
-            active_changed.as_mut().enable();
             tokio::select! {
                 () = queue_space => {}
                 () = active_changed => {}
@@ -273,7 +272,8 @@ impl Submitter {
             return;
         };
 
-        space_available.notified().await;
+        let seen = space_available.generation();
+        space_available.changed_after(seen).await;
     }
 
     pub(crate) fn try_send(
@@ -340,7 +340,7 @@ impl Submitter {
 }
 
 impl ActivePipes {
-    fn next_space_notify_any(&mut self) -> Option<Arc<Notify>> {
+    fn next_space_notify_any(&mut self) -> Option<Arc<StateSignal>> {
         // Prefer inactive pipes: they are the ones we're waiting on.
         for pipe in &self.inactive {
             if pipe.tx.is_alive() {
@@ -382,7 +382,7 @@ pub(crate) struct RoundRobinSend {
     queue: FallbackQueue,
     shared_rx: FallbackReceiver,
     active: Arc<Mutex<ActivePipes>>,
-    active_changed: Arc<Notify>,
+    active_changed: Arc<StateSignal>,
     peer_count: usize,
 }
 
@@ -394,7 +394,7 @@ impl RoundRobinSend {
             queue,
             shared_rx,
             active: Arc::new(Mutex::new(ActivePipes::default())),
-            active_changed: Arc::new(Notify::new()),
+            active_changed: Arc::new(StateSignal::new()),
             peer_count: 0,
         }
     }
@@ -428,11 +428,11 @@ impl RoundRobinSend {
                 active.random_index(len)
             };
             active.active.insert(pos, ActivePipe { peer_id, tx });
-            self.active_changed.notify_waiters();
+            self.active_changed.notify_changed();
             return;
         }
         active.fallback_peers.insert(peer_id);
-        self.active_changed.notify_waiters();
+        self.active_changed.notify_changed();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -442,7 +442,7 @@ impl RoundRobinSend {
             .lock()
             .expect("round_robin active")
             .remove_peer(peer_id);
-        self.active_changed.notify_waiters();
+        self.active_changed.notify_changed();
     }
 
     /// Cloneable handle for enqueuing from a spawned task. Lets the socket
@@ -460,7 +460,7 @@ impl RoundRobinSend {
         self.queue.shutdown();
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
-        self.active_changed.notify_waiters();
+        self.active_changed.notify_changed();
     }
 
     pub(crate) fn is_drained(&self) -> bool {

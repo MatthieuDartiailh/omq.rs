@@ -1,4 +1,5 @@
 use super::{DisconnectReason, MonitorEvent, PeerEntry, SocketDriver, SocketType};
+use crate::engine::signal::StateSignal;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -97,13 +98,13 @@ impl<'a> PeerLifecycle<'a> {
         if recv_bypass {
             spsc.recv_ready.store(true, Ordering::Release);
         }
-        self.driver.spsc.activated.notify_one();
+        self.driver.spsc.activated.notify_changed();
     }
 
     pub(super) fn register_tcp_consumer(
         &mut self,
         consumer: yring::Consumer<crate::socket::recv::RecvItem>,
-        space: Arc<tokio::sync::Notify>,
+        space: Arc<StateSignal>,
         peer_id: u64,
     ) {
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
@@ -114,7 +115,7 @@ impl<'a> PeerLifecycle<'a> {
         });
         self.driver.spsc.tcp_consumers.write().unwrap().push(entry);
         self.bump_recv_consumers();
-        self.driver.spsc.activated.notify_one();
+        self.driver.spsc.activated.notify_changed();
     }
 
     fn publish_disconnect(&self, peer: Option<&PeerEntry>, reason: DisconnectReason) {
@@ -139,7 +140,7 @@ impl<'a> PeerLifecycle<'a> {
             && let Some(ref removed_spsc) = peer.spsc
         {
             removed_spsc.recv_ready.store(false, Ordering::Release);
-            removed_spsc.space_notify.notify_waiters();
+            removed_spsc.space_notify.notify_changed();
         }
     }
 

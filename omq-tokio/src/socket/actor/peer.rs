@@ -471,7 +471,7 @@ pub(super) async fn inproc_peer_driver(
     let mut shared_batch = Vec::new();
     let mut send_pipe_batch = Vec::new();
     // Keep fallback before yring until yring wins once; after that,
-    // empty fallback waiting would add a Notify waiter-list lock on the
+    // empty fallback waiting would add a signal waiter-list lock on the
     // hot select path.
     let mut prioritize_shared_rx = shared_rx.is_some();
 
@@ -524,7 +524,7 @@ pub(super) async fn inproc_peer_driver(
                 },
                 msg = async {
                     if let Some(ref rx) = shared_rx {
-                        rx.recv().await
+                        rx.recv_with_drain().await
                     } else {
                         std::future::pending().await
                     }
@@ -563,7 +563,7 @@ pub(super) async fn inproc_peer_driver(
                     }
                 },
                 () = async {
-                    send_pipe_rx.as_ref().unwrap().notified().await;
+                    send_pipe_rx.as_ref().unwrap().ready().await;
                 }, if send_pipe_rx.is_some() => {
                     let send_pipe_rx = send_pipe_rx.as_mut().unwrap();
                     let drained = send_pipe_rx.drain_into(

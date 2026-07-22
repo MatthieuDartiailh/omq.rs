@@ -14,12 +14,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Notify;
-
 use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
+use crate::engine::signal::StateSignal;
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::engine::{PeerDriverCommand, PeerDriverHandle, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
@@ -30,7 +29,7 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
 enum SendRetry {
-    Full(Message, Arc<Notify>),
+    Full(Message, Option<Arc<StateSignal>>),
 }
 
 /// Per-peer send target. Prefers `SendPipe` (zero-copy yring) when available;
@@ -63,7 +62,7 @@ impl PeerTarget {
         }
     }
 
-    fn space_available(&self) -> Option<Arc<Notify>> {
+    fn space_available(&self) -> Option<Arc<StateSignal>> {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => Some(p.space_available()),
             Self::Direct(target) => target.space_available(),
@@ -134,14 +133,18 @@ impl Submitter {
                 Ok(()) => return Ok(()),
                 Err(SendRetry::Full(returned, space)) => {
                     msg = returned;
-                    let notified = space.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
+                    let Some(space) = space else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    let seen = space.generation();
+                    let changed = space.changed_after(seen);
+                    tokio::pin!(changed);
                     match self.try_send_to(&identity, msg)? {
                         Ok(()) => return Ok(()),
                         Err(SendRetry::Full(returned, _)) => msg = returned,
                     }
-                    notified.await;
+                    changed.await;
                 }
             }
         }
@@ -161,7 +164,8 @@ impl Submitter {
                 .and_then(|peer| peer.target.space_available())
         };
         if let Some(notified) = notified {
-            notified.notified().await;
+            let seen = notified.generation();
+            notified.changed_after(seen).await;
         } else {
             tokio::task::yield_now().await;
         }
@@ -236,10 +240,7 @@ impl Submitter {
             Ok(()) => Ok(Ok(())),
             Err(SendPipeError::Closed(_)) => Err(Error::Closed),
             Err(SendPipeError::Full(returned)) => {
-                let space = peer
-                    .target
-                    .space_available()
-                    .unwrap_or_else(|| Arc::new(Notify::new()));
+                let space = peer.target.space_available();
                 Ok(Err(SendRetry::Full(returned, space)))
             }
         }

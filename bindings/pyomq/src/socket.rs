@@ -161,7 +161,7 @@ pub(crate) struct Materialized {
     pub recv_cons: Mutex<yring::Consumer<omq_tokio::Message>>,
     pub recv_notify: Arc<RecvNotify>,
     pub send_notify: Arc<RecvNotify>,
-    pub recv_space: Arc<tokio::sync::Notify>,
+    pub recv_space: Arc<omq_tokio::engine::StateSignal>,
     pub send_pump: JoinHandle<()>,
     pub recv_pump: JoinHandle<()>,
 }
@@ -245,7 +245,7 @@ impl SocketInner {
         let (recv_prod, recv_cons) = yring::spsc(recv_cap);
         let recv_notify = Arc::new(RecvNotify::new());
         let send_notify = Arc::new(RecvNotify::new());
-        let recv_space = Arc::new(tokio::sync::Notify::new());
+        let recv_space = Arc::new(omq_tokio::engine::StateSignal::new());
         let st = self.socket_type;
         let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
             st,

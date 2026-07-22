@@ -150,7 +150,7 @@ impl ContextInner {
         mut recv_prod: yring::Producer<omq_tokio::Message>,
         recv_notify: Arc<crate::socket::RecvNotify>,
         send_notify: Arc<crate::socket::RecvNotify>,
-        recv_space: Arc<tokio::sync::Notify>,
+        recv_space: Arc<omq_tokio::engine::StateSignal>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let handle = self.ensure_runtime()?;
         let (otx, orx) = flume::bounded(1);
@@ -190,9 +190,9 @@ impl ContextInner {
                             }
                             Err(returned) => {
                                 m = returned;
-                                let notified = recv_space.notified();
-                                tokio::pin!(notified);
-                                notified.as_mut().enable();
+                                let seen = recv_space.generation();
+                                let changed = recv_space.changed_after(seen);
+                                tokio::pin!(changed);
                                 match recv_prod.push(m) {
                                     Ok(()) => {
                                         recv_prod.flush();
@@ -202,7 +202,7 @@ impl ContextInner {
                                     }
                                     Err(returned2) => {
                                         m = returned2;
-                                        notified.await;
+                                        changed.await;
                                     }
                                 }
                             }
@@ -345,7 +345,7 @@ fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Me
         msgs.push(msg);
     }
     if !msgs.is_empty() {
-        m.recv_space.notify_one();
+        m.recv_space.notify_changed();
     }
     msgs
 }

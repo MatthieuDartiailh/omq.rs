@@ -21,6 +21,7 @@ use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
+use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::{RepEnvelope, fallback_queue::FallbackReceiver};
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
@@ -137,7 +138,7 @@ pub struct RepRecvSink {
 pub struct YringSink {
     pub producer: yring::Producer<RecvItem>,
     pub signal: Box<dyn Fn() + Send + Sync>,
-    pub space: Arc<tokio::sync::Notify>,
+    pub space: Arc<StateSignal>,
 }
 
 /// Shared config for creating and recycling [`RecvSink::Yring`] instances.
@@ -148,7 +149,7 @@ pub struct RecvSinkConfig {
     slot: std::sync::Mutex<Option<RecvSink>>,
     pending_consumer: std::sync::Mutex<Option<yring::Consumer<RecvItem>>>,
     signal: Arc<dyn Fn() + Send + Sync>,
-    space: Arc<tokio::sync::Notify>,
+    space: Arc<StateSignal>,
     cap: usize,
 }
 
@@ -164,7 +165,7 @@ impl RecvSinkConfig {
     pub fn new(
         initial_sink: RecvSink,
         signal: Arc<dyn Fn() + Send + Sync>,
-        space: Arc<tokio::sync::Notify>,
+        space: Arc<StateSignal>,
         cap: usize,
     ) -> Self {
         Self {
@@ -204,7 +205,7 @@ impl RecvSinkConfig {
     }
 
     pub fn notify_space(&self) {
-        self.space.notify_one();
+        self.space.notify_changed();
     }
 }
 
@@ -283,14 +284,14 @@ impl RecvSink {
                     if sink.producer.is_consumer_dropped() {
                         return false;
                     }
-                    let notified = sink.space.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
+                    let seen = sink.space.generation();
+                    let changed = sink.space.changed_after(seen);
+                    tokio::pin!(changed);
                     if let Err(returned) = sink.producer.push(RecvItem::new(msg)) {
                         msg = returned.message;
                         tokio::select! {
                             biased;
-                            () = notified => {}
+                            () = changed => {}
                             () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                         }
                         continue;
@@ -821,7 +822,7 @@ where
         tokio::pin!(hb_sleep);
         let mut hb_ping_sent = false;
         // Keep fallback before yring until yring wins once; after that,
-        // empty fallback waiting would add a Notify waiter-list lock on the
+        // empty fallback waiting would add a signal waiter-list lock on the
         // hot select path.
         let mut prioritize_shared_rx = shared_msg_rx.is_some();
         loop {
@@ -961,7 +962,7 @@ where
                 // post-reconnect) must drain first to preserve ordering.
                 msg = async {
                     if let Some(ref rx) = shared_msg_rx {
-                        rx.recv().await
+                        rx.recv_with_drain().await
                     } else {
                         std::future::pending().await
                     }
@@ -997,7 +998,7 @@ where
                 // Per-peer send pipe: active round-robin pushes raw
                 // messages to this driver, which encodes and writes locally.
                 () = async {
-                    send_pipe_rx.as_ref().unwrap().notified().await;
+                    send_pipe_rx.as_ref().unwrap().ready().await;
                 }, if send_pipe_rx.is_some() && connection.is_ready() => {
                     match handle_send_pipe_ready(
                         &mut send_pipe_rx,
@@ -1337,7 +1338,7 @@ async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
             writer.write_all(arena_buf).await?;
         }
         if drain.space_available {
-            slot.space_available.notify_waiters();
+            slot.space_available.notify_changed();
         }
         return Ok(());
     }
@@ -1352,7 +1353,7 @@ async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
         let chunk_bytes: usize = drain_buf.iter().map(Bytes::len).sum();
         write_chunks(writer, drain_buf).await?;
         if drain.space_available {
-            slot.space_available.notify_waiters();
+            slot.space_available.notify_changed();
         }
         if !budget.account(chunk_bytes) {
             slot.data_signal.reschedule();
@@ -1796,7 +1797,7 @@ mod tests {
             signal: Box::new(move || {
                 signals_for_sink.fetch_add(1, Ordering::Relaxed);
             }),
-            space: Arc::new(tokio::sync::Notify::new()),
+            space: Arc::new(StateSignal::new()),
         };
 
         assert!(matches!(
