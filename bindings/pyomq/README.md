@@ -64,7 +64,7 @@ across the runtime trip.
 
 ## Performance
 
-See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) for full tables.
+See [COMPARISONS.md](https://github.com/paddor/omq.rs/blob/main/COMPARISONS.md) for full tables.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/pyomq/doc/charts/bindings.svg" alt="pyomq vs pyzmq performance" width="850">
