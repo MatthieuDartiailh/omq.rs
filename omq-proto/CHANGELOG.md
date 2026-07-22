@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-07-22
+
 ### Changed
 
 - Remove the blanket 32-bit target rejection. 32-bit Linux targets with

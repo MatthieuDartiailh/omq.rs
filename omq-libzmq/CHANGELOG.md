@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-22
+
 ### Added
 
 - `ZMQ_MSG_T_SIZE` support through `zmq_ctx_get`.
@@ -17,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both 64-bit and 32-bit targets.
 - Inproc bypass cursors now use 64-bit atomics so 32-bit targets do not alias
   at the 4 GiB cursor boundary.
+- `zmq_proxy` and `zmq_proxy_steerable` now forward complete messages through
+  libzmq-compatible queues, with capture, control, and backpressure handling.
+
+### Fixed
+
+- Context shutdown and inproc close races now wake waiters reliably.
+- Socket close honors linger before final driver shutdown.
 
 ## [0.5.4] - 2026-07-19
 

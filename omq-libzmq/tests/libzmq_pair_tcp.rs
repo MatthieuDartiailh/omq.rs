@@ -122,19 +122,27 @@ fn pair_tcp_many_messages() {
 
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    set_timeo(sc, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let payload = [0xABu8; 64];
 
-    for _ in 0..N {
-        let rc = zmq_send(sc, payload.as_ptr().cast(), payload.len(), 0);
-        assert_eq!(rc as usize, payload.len());
-    }
+    let sender = std::thread::spawn({
+        let sc = sc as usize;
+        move || {
+            let sc = sc as *mut std::ffi::c_void;
+            for i in 0..N {
+                let rc = zmq_send(sc, payload.as_ptr().cast(), payload.len(), 0);
+                assert_eq!(rc as usize, payload.len(), "send {i} failed");
+            }
+        }
+    });
 
     let mut buf = [0u8; 128];
-    for _ in 0..N {
+    for i in 0..N {
         let rc = zmq_recv(sb, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert_eq!(rc as usize, payload.len());
-        assert_eq!(&buf[..payload.len()], &payload[..]);
+        assert_eq!(rc as usize, payload.len(), "recv {i} failed");
+        assert_eq!(&buf[..payload.len()], &payload[..], "recv {i} payload");
     }
+    sender.join().expect("sender thread panicked");
 
     zmq_close(sc);
     zmq_close(sb);
