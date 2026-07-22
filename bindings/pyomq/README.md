@@ -112,6 +112,13 @@ to the peer once. After that the compression threshold drops from 512 B to
 128 B, so small structured messages start compressing too. Pure Rust (lz4rip),
 no C compiler required.
 
+Enable it on sockets that send compressible traffic before `bind()`/`connect()`:
+
+```python
+push.compression_auto_train = 1
+# or: push.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 1)
+```
+
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for throughput charts and benchmark details.
 Wire format: [LZ4 transport RFC](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md).
 
@@ -133,7 +140,8 @@ pull.curve_secretkey = server_sec
 # Option 1: allow specific client keys (checked in Rust, no GIL overhead)
 pull.set_curve_auth([client_pub])
 
-# Option 2: custom callback receiving a PeerInfo with a .public_key (Z85 bytes)
+# Option 2: custom callback. PeerInfo has .public_key (Z85) and
+# .identity (bytes or None).
 pull.set_curve_auth(lambda peer: peer.public_key in allowed_keys)
 
 # Option 3: accept any valid CURVE client (the default)

@@ -792,7 +792,9 @@ impl Socket {
         }
         if let Some(m) = self.inner.take_materialized() {
             let ctx = self.inner.ctx.clone();
-            py.detach(|| ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump, linger));
+            py.detach(|| {
+                ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump, linger)
+            });
         }
         Ok(())
     }

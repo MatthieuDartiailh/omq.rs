@@ -147,3 +147,30 @@ def test_curve_auth_callback_receives_z85_key(tcp_endpoint):
         push.close()
         pull.close()
         ctx.term()
+
+
+def test_curve_auth_callback_receives_identity(tcp_endpoint):
+    captured = []
+    ctx = zmq.Context()
+    router = ctx.socket(zmq.ROUTER)
+    dealer = ctx.socket(zmq.DEALER)
+    try:
+        client_pub = _setup_curve(router, dealer)
+        dealer.identity = b"client-one"
+
+        def auth(peer):
+            captured.append(peer.identity)
+            return peer.public_key == client_pub and peer.identity == b"client-one"
+
+        router.set_curve_auth(auth)
+        ep = router.bind(tcp_endpoint)
+        dealer.connect(ep)
+        dealer.send(b"probe")
+        router.setsockopt(zmq.RCVTIMEO, 5000)
+        assert router.recv_multipart() == [b"client-one", b"probe"]
+
+        assert captured == [b"client-one"]
+    finally:
+        dealer.close()
+        router.close()
+        ctx.term()

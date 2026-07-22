@@ -50,7 +50,10 @@ pub(crate) fn build_authenticator(
             let cb = Python::attach(|py| cb.clone_ref(py));
             omq_proto::proto::mechanism::Authenticator::new(move |peer| {
                 Python::attach(|py| {
-                    let info = Py::new(py, PeerInfo::from_raw(py, &peer.public_key));
+                    let info = Py::new(
+                        py,
+                        PeerInfo::from_raw(py, &peer.public_key, peer.identity.as_ref()),
+                    );
                     let info = match info {
                         Ok(i) => i,
                         Err(_) => return false,

@@ -1,5 +1,7 @@
 """Async API authentication tests for CURVE."""
 
+import asyncio
+
 import pytest
 
 import pyomq
@@ -65,3 +67,39 @@ async def test_async_curve_auth_callback(tcp_endpoint):
     finally:
         push.close()
         pull.close()
+
+
+@pytest.mark.skipif(not pyomq.has("curve"), reason="curve feature not compiled")
+@pytest.mark.asyncio
+async def test_async_curve_auth_callback_receives_identity(tcp_endpoint):
+    server_pub, server_sec = pyomq.curve_keypair()
+    client_pub, client_sec = pyomq.curve_keypair()
+    captured = []
+
+    ctx = zmq_async.Context()
+    router = ctx.socket(pyomq.ROUTER)
+    dealer = ctx.socket(pyomq.DEALER)
+    try:
+        router.curve_server = 1
+        router.curve_publickey = server_pub
+        router.curve_secretkey = server_sec
+        router.set_curve_auth(
+            lambda peer: captured.append(peer.identity) is None
+            and peer.public_key == client_pub
+            and peer.identity == b"async-client"
+        )
+
+        dealer.identity = b"async-client"
+        dealer.curve_serverkey = server_pub
+        dealer.curve_publickey = client_pub
+        dealer.curve_secretkey = client_sec
+
+        ep = router.bind(tcp_endpoint)
+        dealer.connect(ep)
+        dealer.send(b"async-probe")
+        msg = await asyncio.wait_for(router.recv_multipart(), timeout=5.0)
+        assert msg == [b"async-client", b"async-probe"]
+        assert captured == [b"async-client"]
+    finally:
+        dealer.close()
+        router.close()

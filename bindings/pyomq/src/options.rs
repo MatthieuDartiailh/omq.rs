@@ -108,7 +108,7 @@ impl Default for Overlay {
             curve_authenticator: None,
             on_mute: OnMute::Block,
             compression_dict: None,
-            compression_auto_train: true,
+            compression_auto_train: false,
             reconnect_stop: 0,
         }
     }
