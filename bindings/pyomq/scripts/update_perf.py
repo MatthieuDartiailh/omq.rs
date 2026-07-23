@@ -782,22 +782,27 @@ def run_proxy(lib_name):
     sys.stdout.flush()
     if client is not None:
         _measure_proxy_native(lib_name, client, 1.0)
-        pp = max(_measure_proxy_native(lib_name, client)
-                 for _ in range(N_ROUNDS))
+        pushpull_rate = max(
+            _measure_proxy_native(lib_name, client) for _ in range(N_ROUNDS)
+        )
     else:
         _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
-        pp = max(_measure_proxy_subprocess(lib_name, "pushpull", 200_000)
-                 for _ in range(N_ROUNDS))
-    print(f" {fmt_rate(pp)}")
+        pushpull_rate = max(
+            _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
+            for _ in range(N_ROUNDS)
+        )
+    print(f" {fmt_rate(pushpull_rate)}")
 
     sys.stdout.write("  REQ/REP ...")
     sys.stdout.flush()
     _measure_proxy_subprocess(lib_name, "reqrep", 10_000)
-    rr = max(_measure_proxy_subprocess(lib_name, "reqrep", 10_000)
-             for _ in range(N_ROUNDS))
-    print(f" {fmt_rate(rr)}")
+    reqrep_rate = max(
+        _measure_proxy_subprocess(lib_name, "reqrep", 10_000)
+        for _ in range(N_ROUNDS)
+    )
+    print(f" {fmt_rate(reqrep_rate)}")
 
-    return pp, rr
+    return pushpull_rate, reqrep_rate
 
 
 # ── SVG chart generation ────────────────────────────────────────────

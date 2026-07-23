@@ -29,21 +29,20 @@ pub(crate) struct SendBuffer {
     pub parts: Vec<Bytes>,
 }
 
-/// Notification primitive for the recv path: tokio pump signals Python
-/// thread via eventfd when a message is pushed into the yring.
+/// Eventfd-backed readiness signal for Python-facing async paths.
 ///
 /// The `parking` flag avoids syscalls on the hot path. The consumer
 /// sets it before sleeping; the producer only writes to the eventfd
 /// when it sees the flag.
-pub(crate) struct RecvNotify {
+pub(crate) struct EventFdSignal {
     efd: i32,
     parking: AtomicBool,
 }
 
-unsafe impl Send for RecvNotify {}
-unsafe impl Sync for RecvNotify {}
+unsafe impl Send for EventFdSignal {}
+unsafe impl Sync for EventFdSignal {}
 
-impl RecvNotify {
+impl EventFdSignal {
     pub fn new() -> Self {
         let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         assert!(efd >= 0, "eventfd creation failed");
@@ -53,7 +52,7 @@ impl RecvNotify {
         }
     }
 
-    pub fn notify(&self) {
+    pub fn signal(&self) {
         if self.parking.load(Ordering::Acquire) {
             self.write_eventfd();
         }
@@ -121,7 +120,7 @@ impl RecvNotify {
     }
 }
 
-impl Drop for RecvNotify {
+impl Drop for EventFdSignal {
     fn drop(&mut self) {
         unsafe { libc::close(self.efd) };
     }
@@ -159,8 +158,8 @@ pub(crate) struct Materialized {
     pub socket: Arc<omq_tokio::Socket>,
     pub send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
     pub recv_cons: Mutex<yring::Consumer<omq_tokio::Message>>,
-    pub recv_notify: Arc<RecvNotify>,
-    pub send_notify: Arc<RecvNotify>,
+    pub recv_ready: Arc<EventFdSignal>,
+    pub send_ready: Arc<EventFdSignal>,
     pub recv_space: Arc<omq_tokio::engine::StateSignal>,
     pub send_pump: JoinHandle<()>,
     pub recv_pump: JoinHandle<()>,
@@ -226,15 +225,15 @@ impl SocketInner {
         if self.closed.load(Ordering::Relaxed) {
             return Err(map_err(omq_proto::error::Error::Closed));
         }
-        let fgen = FORK_GEN.load(Ordering::Relaxed);
+        let fork_gen = FORK_GEN.load(Ordering::Relaxed);
         {
             let slot = self.materialized.read().unwrap();
-            if slot.as_ref().is_some_and(|m| m.fork_gen == fgen) {
+            if slot.as_ref().is_some_and(|m| m.fork_gen == fork_gen) {
                 return Ok(());
             }
         }
         let mut slot = self.materialized.write().unwrap();
-        if slot.as_ref().is_some_and(|m| m.fork_gen == fgen) {
+        if slot.as_ref().is_some_and(|m| m.fork_gen == fork_gen) {
             return Ok(());
         }
         *slot = None;
@@ -243,27 +242,27 @@ impl SocketInner {
         let recv_cap = opts.recv_hwm.max(1) as usize;
         let (send_prod, send_cons) = yring::async_spsc(send_cap);
         let (recv_prod, recv_cons) = yring::spsc(recv_cap);
-        let recv_notify = Arc::new(RecvNotify::new());
-        let send_notify = Arc::new(RecvNotify::new());
+        let recv_ready = Arc::new(EventFdSignal::new());
+        let send_ready = Arc::new(EventFdSignal::new());
         let recv_space = Arc::new(omq_tokio::engine::StateSignal::new());
-        let st = self.socket_type;
+        let socket_type = self.socket_type;
         let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
-            st,
+            socket_type,
             opts,
             send_cons,
             recv_prod,
-            recv_notify.clone(),
-            send_notify.clone(),
+            recv_ready.clone(),
+            send_ready.clone(),
             recv_space.clone(),
         )?;
         *slot = Some(Materialized {
             id,
-            fork_gen: fgen,
+            fork_gen,
             socket,
             send_prod: Mutex::new(send_prod),
             recv_cons: Mutex::new(recv_cons),
-            recv_notify,
-            send_notify,
+            recv_ready,
+            send_ready,
             recv_space,
             send_pump,
             recv_pump,
@@ -272,9 +271,9 @@ impl SocketInner {
     }
 
     pub fn ensure_id(&self) -> PyResult<u64> {
-        let fgen = FORK_GEN.load(Ordering::Relaxed);
+        let fork_gen = FORK_GEN.load(Ordering::Relaxed);
         if let Some(m) = self.blocking_materialized.read().unwrap().as_ref()
-            && m.fork_gen == fgen
+            && m.fork_gen == fork_gen
         {
             return Ok(m.id);
         }
@@ -286,18 +285,18 @@ impl SocketInner {
         if self.closed.load(Ordering::Relaxed) {
             return Err(map_err(omq_proto::error::Error::Closed));
         }
-        let fgen = FORK_GEN.load(Ordering::Relaxed);
+        let fork_gen = FORK_GEN.load(Ordering::Relaxed);
         if self
             .blocking_materialized
             .read()
             .unwrap()
             .as_ref()
-            .is_some_and(|m| m.fork_gen == fgen)
+            .is_some_and(|m| m.fork_gen == fork_gen)
         {
             return Ok(());
         }
         let mut slot = self.blocking_materialized.write().unwrap();
-        if slot.as_ref().is_some_and(|m| m.fork_gen == fgen) {
+        if slot.as_ref().is_some_and(|m| m.fork_gen == fork_gen) {
             return Ok(());
         }
         // The inherited blocking socket owns the parent's runtime. Dropping
@@ -316,7 +315,7 @@ impl SocketInner {
         }
         *slot = Some(BlockingMaterialized {
             id,
-            fork_gen: fgen,
+            fork_gen,
             socket,
         });
         Ok(())
@@ -400,11 +399,11 @@ impl SocketInner {
     /// the next op and exit; the registry entry is removed separately.
     pub fn take_materialized(&self) -> Option<Materialized> {
         self.closed.store(true, Ordering::Relaxed);
-        let mat = self.materialized.write().unwrap().take();
-        if let Some(ref m) = mat {
-            m.recv_notify.force_wake();
+        let materialized = self.materialized.write().unwrap().take();
+        if let Some(ref state) = materialized {
+            state.recv_ready.force_wake();
         }
-        mat
+        materialized
     }
 
     pub fn take_blocking_materialized(&self) -> Option<BlockingMaterialized> {

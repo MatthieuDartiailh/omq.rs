@@ -33,22 +33,23 @@ struct RuntimeState {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-static GLOBAL_RECV_READY: Mutex<Option<(u32, Arc<crate::socket::RecvNotify>)>> = Mutex::new(None);
+static GLOBAL_RECV_SIGNAL: Mutex<Option<(u32, Arc<crate::socket::EventFdSignal>)>> =
+    Mutex::new(None);
 
-/// Process-global recv notification for `wait_any`. Recv pumps from all
+/// Process-global recv signal for `wait_any`. Recv pumps from all
 /// contexts signal this after pushing a message; `wait_any` parks on it.
 /// Recreated after fork (PID guard).
-pub(crate) fn global_recv_ready() -> Arc<crate::socket::RecvNotify> {
-    let mut guard = GLOBAL_RECV_READY.lock().unwrap();
+pub(crate) fn global_recv_signal() -> Arc<crate::socket::EventFdSignal> {
+    let mut guard = GLOBAL_RECV_SIGNAL.lock().unwrap();
     let pid = std::process::id();
-    if let Some((p, rr)) = guard.as_ref()
-        && *p == pid
+    if let Some((cached_pid, signal)) = guard.as_ref()
+        && *cached_pid == pid
     {
-        return rr.clone();
+        return signal.clone();
     }
-    let rr = Arc::new(crate::socket::RecvNotify::new());
-    *guard = Some((pid, rr.clone()));
-    rr
+    let signal = Arc::new(crate::socket::EventFdSignal::new());
+    *guard = Some((pid, signal.clone()));
+    signal
 }
 
 /// Allocate the next socket id. Strictly monotonic; never recycled.
@@ -148,60 +149,60 @@ impl ContextInner {
         options: omq_tokio::Options,
         send_cons: yring::AsyncConsumer<omq_tokio::Message>,
         mut recv_prod: yring::Producer<omq_tokio::Message>,
-        recv_notify: Arc<crate::socket::RecvNotify>,
-        send_notify: Arc<crate::socket::RecvNotify>,
+        recv_ready: Arc<crate::socket::EventFdSignal>,
+        send_ready: Arc<crate::socket::EventFdSignal>,
         recv_space: Arc<omq_tokio::engine::StateSignal>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let handle = self.ensure_runtime()?;
         let (otx, orx) = flume::bounded(1);
-        let grr = global_recv_ready();
+        let recv_all_signal = global_recv_signal();
         handle.spawn(async move {
             let id = next_id();
             let sock = Arc::new(InnerSocket::new(socket_type, options));
 
             const SEND_YIELD_INTERVAL: u32 = 256;
-            let s = sock.clone();
+            let send_socket = sock.clone();
             let send_pump = tokio::spawn(async move {
                 futures::pin_mut!(send_cons);
                 let mut batch = 0u32;
                 while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
-                    let _ = s.send(msg).await;
-                    send_notify.notify();
+                    let _ = send_socket.send(msg).await;
+                    send_ready.signal();
                     batch += 1;
                     if batch >= SEND_YIELD_INTERVAL {
                         batch = 0;
                         tokio::task::yield_now().await;
                     }
                 }
-                send_notify.notify();
+                send_ready.signal();
             });
 
-            let s = sock.clone();
+            let recv_socket = sock.clone();
             let recv_pump = tokio::spawn(async move {
-                while let Ok(msg) = s.recv().await {
-                    let mut m = msg;
+                while let Ok(msg) = recv_socket.recv().await {
+                    let mut pending_msg = msg;
                     loop {
-                        match recv_prod.push(m) {
+                        match recv_prod.push(pending_msg) {
                             Ok(()) => {
                                 recv_prod.flush();
-                                recv_notify.notify();
-                                grr.notify();
+                                recv_ready.signal();
+                                recv_all_signal.signal();
                                 break;
                             }
                             Err(returned) => {
-                                m = returned;
+                                pending_msg = returned;
                                 let seen = recv_space.generation();
                                 let changed = recv_space.changed_after(seen);
                                 tokio::pin!(changed);
-                                match recv_prod.push(m) {
+                                match recv_prod.push(pending_msg) {
                                     Ok(()) => {
                                         recv_prod.flush();
-                                        recv_notify.notify();
-                                        grr.notify();
+                                        recv_ready.signal();
+                                        recv_all_signal.signal();
                                         break;
                                     }
                                     Err(returned2) => {
-                                        m = returned2;
+                                        pending_msg = returned2;
                                         changed.await;
                                     }
                                 }
@@ -337,15 +338,17 @@ impl Drop for ContextInner {
 
 #[allow(dead_code)]
 fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Message> {
-    let mat = inner.materialized.read().unwrap();
-    let Some(m) = mat.as_ref() else { return vec![] };
-    let mut cons = m.recv_cons.lock().unwrap();
+    let materialized_guard = inner.materialized.read().unwrap();
+    let Some(materialized) = materialized_guard.as_ref() else {
+        return vec![];
+    };
+    let mut cons = materialized.recv_cons.lock().unwrap();
     let mut msgs = Vec::new();
     while let Some(msg) = cons.prefetch_and_pop() {
         msgs.push(msg);
     }
     if !msgs.is_empty() {
-        m.recv_space.notify_changed();
+        materialized.recv_space.notify_changed();
     }
     msgs
 }
@@ -353,9 +356,9 @@ fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Me
 #[allow(dead_code)]
 fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Message) {
     let copy = omq_tokio::Message::multipart(msg.iter());
-    let mat = cap.materialized.read().unwrap();
-    if let Some(m) = mat.as_ref() {
-        let mut prod = m.send_prod.lock().unwrap();
+    let materialized_guard = cap.materialized.read().unwrap();
+    if let Some(materialized) = materialized_guard.as_ref() {
+        let mut prod = materialized.send_prod.lock().unwrap();
         let _ = prod.push_and_flush(copy);
     }
 }
@@ -369,26 +372,26 @@ pub fn proxy(
     cap_inner: Option<Arc<crate::socket::SocketInner>>,
     ctrl_inner: Option<Arc<crate::socket::SocketInner>>,
 ) {
-    let fe_mat = fe_inner.materialized.read().unwrap();
-    let fe_m = fe_mat.as_ref().unwrap();
-    fe_m.send_pump.abort();
-    fe_m.recv_pump.abort();
-    let fe_sock = fe_m.socket.clone();
-    drop(fe_mat);
+    let fe_materialized_guard = fe_inner.materialized.read().unwrap();
+    let fe_materialized = fe_materialized_guard.as_ref().unwrap();
+    fe_materialized.send_pump.abort();
+    fe_materialized.recv_pump.abort();
+    let fe_sock = fe_materialized.socket.clone();
+    drop(fe_materialized_guard);
 
-    let be_mat = be_inner.materialized.read().unwrap();
-    let be_m = be_mat.as_ref().unwrap();
-    be_m.send_pump.abort();
-    be_m.recv_pump.abort();
-    let be_sock = be_m.socket.clone();
-    drop(be_mat);
+    let be_materialized_guard = be_inner.materialized.read().unwrap();
+    let be_materialized = be_materialized_guard.as_ref().unwrap();
+    be_materialized.send_pump.abort();
+    be_materialized.recv_pump.abort();
+    let be_sock = be_materialized.socket.clone();
+    drop(be_materialized_guard);
 
-    let ctrl_sock = ctrl_inner.as_ref().map(|c| {
-        let mat = c.materialized.read().unwrap();
-        let m = mat.as_ref().unwrap();
-        m.send_pump.abort();
-        m.recv_pump.abort();
-        m.socket.clone()
+    let ctrl_sock = ctrl_inner.as_ref().map(|ctrl| {
+        let materialized_guard = ctrl.materialized.read().unwrap();
+        let materialized = materialized_guard.as_ref().unwrap();
+        materialized.send_pump.abort();
+        materialized.recv_pump.abort();
+        materialized.socket.clone()
     });
 
     let fe_drained = drain_recv_ring(&fe_inner);
@@ -642,12 +645,12 @@ pub fn wait_any(
                 if !inner.rxmsgs.lock().unwrap().is_empty() {
                     return true;
                 }
-                let mat = inner.materialized.read().unwrap();
-                if let Some(m) = mat.as_ref() {
-                    let cons = m.recv_cons.lock().unwrap();
+                let materialized_guard = inner.materialized.read().unwrap();
+                if let Some(materialized) = materialized_guard.as_ref() {
+                    let cons = materialized.recv_cons.lock().unwrap();
                     !cons.is_empty()
                 } else {
-                    drop(mat);
+                    drop(materialized_guard);
                     let Ok(sock) = inner.ensure_blocking_socket() else {
                         return false;
                     };
@@ -669,13 +672,13 @@ pub fn wait_any(
         return ready;
     }
 
-    let rr = global_recv_ready();
+    let recv_signal = global_recv_signal();
     let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
-    rr.park_begin();
+    recv_signal.park_begin();
     let ready = poll_ready(&sockets);
     if !ready.is_empty() {
-        rr.park_end();
+        recv_signal.park_end();
         return ready;
     }
 
@@ -684,7 +687,7 @@ pub fn wait_any(
             Some(d) => {
                 let now = std::time::Instant::now();
                 if now >= d {
-                    rr.park_end();
+                    recv_signal.park_end();
                     return vec![];
                 }
                 d - now
@@ -695,15 +698,15 @@ pub fn wait_any(
         // Native blocking sockets have thread wakeups, not an eventfd.
         // Poll their try-recv path periodically while retaining the
         // eventfd fast path for asyncio sockets.
-        rr.wait_timeout(wait_dur.min(Duration::from_millis(10)));
+        recv_signal.wait_timeout(wait_dur.min(Duration::from_millis(10)));
 
         let ready = poll_ready(&sockets);
         if !ready.is_empty() {
-            rr.park_end();
+            recv_signal.park_end();
             return ready;
         }
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            rr.park_end();
+            recv_signal.park_end();
             return vec![];
         }
     }

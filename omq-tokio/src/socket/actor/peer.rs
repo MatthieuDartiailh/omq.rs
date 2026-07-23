@@ -65,7 +65,7 @@ impl SocketDriver {
 
     /// Snapshot for inproc bind/connect: socket type + identity. The
     /// inproc transport hands this to its peer at connect time so the
-    /// synthesised handshake can populate `PeerProperties` without a
+    /// synthesized handshake can populate `PeerProperties` without a
     /// real wire exchange.
     pub(super) fn inproc_snapshot(&self) -> InprocPeerSnapshot {
         InprocPeerSnapshot {
@@ -488,7 +488,7 @@ pub(super) async fn inproc_peer_driver(
     }
 
     let result: () = async {
-        // Synthesised handshake. Same event the codec would emit;
+        // Synthesized handshake. Same event the codec would emit;
         // runs through the same handle_peer_event path.
         if emit_event(
             &peer_out,
@@ -626,7 +626,7 @@ pub(super) async fn inproc_peer_driver(
     .await;
     let () = result;
     if let Some(ref ring) = spsc {
-        ring.recv_notify.wake_all();
+        ring.recv_signal.wake_all();
     }
     blocking_recv_waker.wake();
     let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;

@@ -16,7 +16,7 @@ src/
                     curve_keypair, has_feature
   runtime.rs        tokio runtime on dedicated thread; materialize,
                     wait_any, proxy
-  socket.rs         sync Socket + SocketInner + RecvNotify (eventfd) +
+  socket.rs         sync Socket + SocketInner + EventFdSignal (eventfd) +
                     Monitor (connection event stream)
   socket_async.rs   AsyncSocket: send (sync yring push), _try_recv,
                     _recv_fd / _send_fd for eventfd polling
@@ -83,8 +83,8 @@ Materialization:
 2. Create yring producer/consumer pairs (capacities from SNDHWM/RCVHWM).
 3. Post job to the tokio thread: build the socket, spawn send and recv
    pump tasks.
-4. Store `Materialized { id, socket, send_prod, recv_cons, recv_notify,
-   send_pump, recv_pump }` in the `SocketInner`.
+4. Store `Materialized { id, socket, send_prod, recv_cons, recv_ready,
+   send_ready, recv_space, send_pump, recv_pump }` in the `SocketInner`.
 
 This lets Python code do `setsockopt` freely before the socket exists
 on the tokio thread.
@@ -98,17 +98,17 @@ into `socket.send()`. Yields every 256 messages to prevent a single
 high-volume socket from starving others on the runtime.
 
 **Recv pump.** Drains `socket.recv()` into a `Producer<Message>` (read
-by Python). On ring-full, waits on `recv_space` (`tokio::sync::Notify`,
-signaled by the Python consumer after draining). After pushing, signals
-the per-socket `RecvNotify` eventfd and the global `RECV_READY` flag
-(used by `wait_any`).
+by Python). On ring-full, waits on `recv_space` (`StateSignal`, signaled
+by the Python consumer after draining). After pushing, signals the
+per-socket `EventFdSignal` and the process-global recv signal used by
+`wait_any`.
 
-## RecvNotify (eventfd)
+## EventFdSignal (eventfd)
 
-`RecvNotify` wraps a Linux `eventfd(EFD_NONBLOCK)` plus an
+`EventFdSignal` wraps a Linux `eventfd(EFD_NONBLOCK)` plus an
 `AtomicBool parking` flag.
 
-- `notify()`: writes to the eventfd only if `parking` is true. On the
+- `signal()`: writes to the eventfd only if `parking` is true. On the
   hot path (consumer not parked), this is a single atomic load with no
   syscall.
 - `park_begin()` / `park_end()`: arm/disarm the parking flag.
