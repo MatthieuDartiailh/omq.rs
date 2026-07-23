@@ -25,8 +25,15 @@ from . import error
 from . import Context as _SyncContext
 from . import _next_ctx_id
 from . import (
-    FD, POLLIN, POLLOUT, SNDHWM, RCVHWM, LINGER, TYPE, LAST_ENDPOINT,
-    _TYPE_NAMES, _SOCKOPT_NAMES,
+    FD,
+    POLLIN,
+    SNDHWM,
+    RCVHWM,
+    LINGER,
+    LAST_ENDPOINT,
+    _TYPE_NAMES,
+    _SOCKOPT_NAMES,
+    _IS_WINDOWS,
 )
 
 
@@ -140,7 +147,7 @@ class _RecvFuture:
                 return
             if r is not None:
                 try:
-                    os.write(fd, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+                    os.write(fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
                 except OSError:
                     pass
                 loop.remove_reader(fd)
@@ -266,9 +273,11 @@ class Socket:
     def recv(self, flags=0, copy=True, track=False):
         if not copy:
             from pyomq import Frame
+
             async def _wrap():
                 data = await self._add_recv_event(self._sock._try_recv)
                 return Frame(data)
+
             return asyncio.ensure_future(_wrap())
         return self._add_recv_event(self._sock._try_recv)
 
@@ -284,9 +293,11 @@ class Socket:
     def recv_multipart(self, flags=0, copy=True, track=False):
         if not copy:
             from pyomq import Frame
+
             async def _wrap():
                 parts = await self._add_recv_event(self._sock._try_recv_multipart)
                 return [Frame(p) for p in parts]
+
             return asyncio.ensure_future(_wrap())
         return self._add_recv_event(self._sock._try_recv_multipart)
 
@@ -314,6 +325,7 @@ class Socket:
 
     def _send_with_backpressure(self, data, flags):
         fd = self._sock._send_fd()
+
         def try_send():
             try:
                 self._sock.send(data, flags)
@@ -322,10 +334,12 @@ class Socket:
                 if e.errno == _EAGAIN:
                     return None
                 raise
+
         return _RecvFuture(try_send, fd)
 
     def _send_multipart_with_backpressure(self, parts, flags):
         fd = self._sock._send_fd()
+
         def try_send():
             try:
                 self._sock.send_multipart(parts, flags)
@@ -334,6 +348,7 @@ class Socket:
                 if e.errno == _EAGAIN:
                     return None
                 raise
+
         return _RecvFuture(try_send, fd)
 
     # ── Serialization helpers ────────────────────────────────────────
@@ -345,9 +360,7 @@ class Socket:
         return (await self.recv(flags)).decode(encoding)
 
     def send_json(self, obj, flags=0, **kwargs):
-        return self.send(
-            json.dumps(obj, **kwargs).encode("utf-8"), flags
-        )
+        return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
 
     async def recv_json(self, flags=0, **kwargs):
         return json.loads(await self.recv(flags), **kwargs)
@@ -358,11 +371,9 @@ class Socket:
     async def recv_pyobj(self, flags=0):
         return pickle.loads(await self.recv(flags))
 
-    def send_serialized(self, msg, serialize, flags=0, copy=True,
-                        **kwargs):
+    def send_serialized(self, msg, serialize, flags=0, copy=True, **kwargs):
         frames = serialize(msg)
-        return self.send_multipart(frames, flags=flags, copy=copy,
-                                   **kwargs)
+        return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
     async def recv_serialized(self, deserialize, flags=0, copy=True):
         frames = await self.recv_multipart(flags=flags, copy=copy)
@@ -378,6 +389,7 @@ class Socket:
 
     def getsockopt(self, option):
         from pyomq import LAST_ENDPOINT
+
         if option == LAST_ENDPOINT:
             return self._last_endpoint
         try:
@@ -410,6 +422,7 @@ class Socket:
             raise error.from_native(e) from None
         except AttributeError:
             from . import ZMQNotImplementedError
+
             raise ZMQNotImplementedError("curve feature not compiled")
 
     def set_hwm(self, value):
@@ -520,22 +533,14 @@ class Poller:
     async def poll(self, timeout=None):
         if not self._sockets:
             return []
-        pollin_socks = [
-            s._sock
-            for k, (s, f) in self._sockets.items()
-            if f & POLLIN
-        ]
+        pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
         if not pollin_socks:
             return []
         t = None if (timeout is None or timeout < 0) else int(timeout)
         loop = asyncio.get_running_loop()
-        ready_ids = await loop.run_in_executor(
-            None, _native.wait_any, pollin_socks, t
-        )
+        ready_ids = await loop.run_in_executor(None, _native.wait_any, pollin_socks, t)
         return [
-            (self._sockets[rid][0], POLLIN)
-            for rid in ready_ids
-            if rid in self._sockets
+            (self._sockets[rid][0], POLLIN) for rid in ready_ids if rid in self._sockets
         ]
 
 
