@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-07-23
+
+### Added
+
+- Loom coverage for upper-layer stale low-water reactivation and canceled
+  waiter readiness races.
+
 ## [0.3.9] - 2026-07-22
 
 ### Changed

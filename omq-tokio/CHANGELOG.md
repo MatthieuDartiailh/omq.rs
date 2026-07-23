@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-07-23
+
+### Added
+
+- `StateSignal` for generation-based state change notification.
+- Loom coverage for data readiness, space readiness, fallback activation, and
+  send-pipe low-water races.
+- Regression coverage for the PUSH/PULL stall from issue #186.
+- Test coverage that keeps raw `tokio::sync::Notify` behind
+  `engine::signal`.
+
+### Fixed
+
+- Lost wakeups in PUSH/PULL paths when producer notification races with drain
+  clear, capacity release, or peer activation. Fixes issue #186.
+- Inproc and TCP recv-bypass drains now preserve readiness across canceled
+  waiters and stale empty reads.
+- Send-pipe reactivation now rechecks occupancy when the low-water flag is
+  stale.
+- Max-message-size checks now use shared accounting for inproc and ZMTP
+  receives.
+
+### Changed
+
+- Internal readiness primitives now use stateful signal types instead of raw
+  `Notify`.
+- Internal inproc SPSC recv notification names now use signal terminology.
+- Gate the `loom` dev dependency to 64-bit targets.
+
 ## [0.19.2] - 2026-07-22
 
 ### Added

@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.19.2"
+version = "0.19.3"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "loom",
 ]

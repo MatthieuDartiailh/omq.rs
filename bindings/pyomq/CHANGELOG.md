@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-07-23
+
+### Fixed
+
+- Python async readiness paths now use stateful OMQ signal primitives instead
+  of raw `Notify`-style wakeups. This avoids lost wakeups from issue #186.
+
+### Changed
+
+- Rename internal Python readiness fields to `recv_ready` and `send_ready`.
+- Rename the Unix eventfd bridge to `EventFdSignal`.
+- *(deps)* Bump `omq-tokio` to 0.19.3, `omq-proto` to 0.23.2, and
+  `yring` to 0.3.10.
+
 ## [0.16.3] - 2026-07-22
 
 ### Added
