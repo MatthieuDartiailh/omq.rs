@@ -14,11 +14,15 @@ Use::
 """
 
 import asyncio
+import errno as _errno
 import json
 import os
 import pickle
+import select as _select
+import sys
 import threading
 import weakref
+from collections import deque
 
 from . import _native  # type: ignore[attr-defined]
 from . import error
@@ -33,8 +37,12 @@ from . import (
     LAST_ENDPOINT,
     _TYPE_NAMES,
     _SOCKOPT_NAMES,
-    _IS_WINDOWS,
 )
+
+_IS_WINDOWS = sys.platform == "win32"
+_WAKEUP_MODE_NONE = 0
+_WAKEUP_MODE_ASYNC = 1
+_WAKEUP_MODE_SYNC = 2
 
 
 def _resolved_future(result):
@@ -43,9 +51,6 @@ def _resolved_future(result):
     fut.set_result(result)
     return fut
 
-
-import errno as _errno
-import select as _select
 
 _EAGAIN = _errno.EAGAIN
 _MISSING = object()
@@ -170,18 +175,21 @@ class Socket:
     _context: "Context"
     _closed: bool
 
-    def __init__(self, _sock, _context):
+    def _init_socket_state(self, _sock, _context):
         self._sock = _sock
         self._context = _context
         self._closed = False
         self._last_endpoint = None
         if _IS_WINDOWS:
             self._loop = None
-            self._recv_waiters = None
-            self._send_waiters = None
+            self._recv_waiters = deque()
+            self._send_waiters = deque()
             self._recv_wakeup_event = threading.Event()
             self._send_wakeup_event = threading.Event()
             self._wakeup_registered = False
+
+    def __init__(self, _sock, _context):
+        self._init_socket_state(_sock, _context)
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -301,55 +309,183 @@ class Socket:
             return asyncio.ensure_future(_wrap())
         return self._add_recv_event(self._sock._try_recv_multipart)
 
-    def _add_recv_event(self, try_fn):
-        # Fast path: message already available, no event loop needed.
-        try:
-            result = try_fn()
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        if result is not None:
-            return _resolved_future(result)
+    if _IS_WINDOWS:
 
-        fd = self._sock._recv_fd()
+        def _register_wakeup_hooks(self):
+            if not self._wakeup_registered:
+                self._sock._set_wakeup_hooks(
+                    recv_async=self._schedule_recv_drain,
+                    recv_event=self._recv_wakeup_event,
+                    send_async=self._schedule_send_drain,
+                    send_event=self._send_wakeup_event,
+                )
+                self._wakeup_registered = True
 
-        try:
-            result = try_fn()
-        except _native.ZMQError as e:
-            os.close(fd)
-            raise error.from_native(e) from None
-        if result is not None:
-            os.close(fd)
-            return _resolved_future(result)
+        def _set_wakeup_modes(self, *, recv_mode=None, send_mode=None):
+            self._sock._set_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
 
-        return _RecvFuture(try_fn, fd)
+        def _schedule_recv_drain(self):
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                self._sock._mark_recv_drain_complete()
+                return
+            loop.call_soon_threadsafe(self._drain_recv_waiters)
 
-    def _send_with_backpressure(self, data, flags):
-        fd = self._sock._send_fd()
+        def _schedule_send_drain(self):
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                self._sock._mark_send_drain_complete()
+                return
+            loop.call_soon_threadsafe(self._drain_send_waiters)
 
-        def try_send():
+        def _drain_recv_waiters(self):
+            """Invoke each waiter until one returns False (not ready)."""
             try:
-                self._sock.send(data, flags)
-                return True
-            except _native.ZMQError as e:
-                if e.errno == _EAGAIN:
-                    return None
-                raise
+                waiters = self._recv_waiters
+                while waiters and waiters[0]():
+                    waiters.popleft()
+            finally:
+                self._sock._mark_recv_drain_complete()
 
-        return _RecvFuture(try_send, fd)
-
-    def _send_multipart_with_backpressure(self, parts, flags):
-        fd = self._sock._send_fd()
-
-        def try_send():
+        def _drain_send_waiters(self):
+            """Invoke each waiter until one returns False (not ready)."""
             try:
-                self._sock.send_multipart(parts, flags)
-                return True
-            except _native.ZMQError as e:
-                if e.errno == _EAGAIN:
-                    return None
-                raise
+                waiters = self._send_waiters
+                while waiters and waiters[0]():
+                    waiters.popleft()
+            finally:
+                self._sock._mark_send_drain_complete()
 
-        return _RecvFuture(try_send, fd)
+        def _add_waitable(self, try_fn, waiters, set_mode):
+            """Register a Windows waiter that resolves when try_fn returns
+            non-None. try_fn must return None when not ready and raise on
+            real errors."""
+            loop = asyncio.get_running_loop()
+            self._loop = loop
+
+            result = try_fn()
+            if result is not None:
+                return _resolved_future(result)
+
+            self._register_wakeup_hooks()
+            fut = loop.create_future()
+
+            def _waiter() -> bool:
+                if fut.done():
+                    return True
+                try:
+                    result = try_fn()
+                except Exception as e:
+                    if not fut.done():
+                        fut.set_exception(e)
+                    return True
+                if result is not None and not fut.done():
+                    fut.set_result(result)
+                    return True
+                return False
+
+            waiters.append(_waiter)
+            set_mode()
+            if _waiter():
+                waiters.remove(_waiter)
+
+            return fut
+
+        def _add_recv_event(self, try_fn):
+            def safe_try():
+                try:
+                    return try_fn()
+                except _native.ZMQError as e:
+                    raise error.from_native(e) from None
+
+            return self._add_waitable(
+                safe_try,
+                self._recv_waiters,
+                lambda: self._set_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC),
+            )
+
+        def _send_with_backpressure(self, data, flags):
+            def try_send():
+                try:
+                    self._sock.send(data, flags)
+                    return True
+                except _native.ZMQError as e:
+                    if e.errno == _errno.EAGAIN:
+                        return None
+                    raise error.from_native(e) from None
+
+            return self._add_waitable(
+                try_send,
+                self._send_waiters,
+                lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
+            )
+
+        def _send_multipart_with_backpressure(self, parts, flags):
+            def try_send():
+                try:
+                    self._sock.send_multipart(parts, flags)
+                    return True
+                except _native.ZMQError as e:
+                    if e.errno == _errno.EAGAIN:
+                        return None
+                    raise error.from_native(e) from None
+
+            return self._add_waitable(
+                try_send,
+                self._send_waiters,
+                lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
+            )
+    else:
+
+        def _add_recv_event(self, try_fn):
+            # Fast path: message already available, no event loop needed.
+            try:
+                result = try_fn()
+            except _native.ZMQError as e:
+                raise error.from_native(e) from None
+            if result is not None:
+                return _resolved_future(result)
+
+            fd = self._sock._recv_fd()
+
+            try:
+                result = try_fn()
+            except _native.ZMQError as e:
+                os.close(fd)
+                raise error.from_native(e) from None
+            if result is not None:
+                os.close(fd)
+                return _resolved_future(result)
+
+            return _RecvFuture(try_fn, fd)
+
+        def _send_with_backpressure(self, data, flags):
+            fd = self._sock._send_fd()
+
+            def try_send():
+                try:
+                    self._sock.send(data, flags)
+                    return True
+                except _native.ZMQError as e:
+                    if e.errno == _errno.EAGAIN:
+                        return None
+                    raise
+
+            return _RecvFuture(try_send, fd)
+
+        def _send_multipart_with_backpressure(self, parts, flags):
+            fd = self._sock._send_fd()
+
+            def try_send():
+                try:
+                    self._sock.send_multipart(parts, flags)
+                    return True
+                except _native.ZMQError as e:
+                    if e.errno == _errno.EAGAIN:
+                        return None
+                    raise
+
+            return _RecvFuture(try_send, fd)
 
     # ── Serialization helpers ────────────────────────────────────────
 
@@ -460,23 +596,6 @@ class Socket:
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    # ── Windows wakeup integration ───────────────────────────────────
-
-    if _IS_WINDOWS:
-
-        def _register_wakeup_hooks(self):
-            if not self._wakeup_registered:
-                self._sock._set_wakeup_hooks(
-                    recv_async=None,
-                    recv_event=self._recv_wakeup_event,
-                    send_async=None,
-                    send_event=self._send_wakeup_event,
-                )
-                self._wakeup_registered = True
-
-        def _set_wakeup_modes(self, *, recv_mode=None, send_mode=None):
-            self._sock._set_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
-
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def close(self, linger=None):
@@ -573,6 +692,7 @@ class Context(_SyncContext):
         s._pid = os.getpid()
         s._binds = []
         s._connects = []
+        s._init_socket_state(native, self)
         self._sockets.add(s)
         return s
 
