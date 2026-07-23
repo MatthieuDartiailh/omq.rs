@@ -346,6 +346,10 @@ class Socket:
                     waiters.popleft()
             finally:
                 self._sock._mark_recv_drain_complete()
+                # Ensure we drain any notification that arrived in between
+                # the end of the try block and the call to _mark_recv_drain_complete.
+                while waiters and waiters[0]():
+                    waiters.popleft()
 
         def _drain_send_waiters(self):
             """Invoke each waiter until one returns False (not ready)."""
@@ -355,6 +359,10 @@ class Socket:
                     waiters.popleft()
             finally:
                 self._sock._mark_send_drain_complete()
+                # Ensure we drain any notification that arrived in between
+                # the end of the try block and the call to _mark_recv_drain_complete.
+                while waiters and waiters[0]():
+                    waiters.popleft()
 
         def _add_waitable(self, try_fn, waiters, set_mode):
             """Register a Windows waiter that resolves when try_fn returns
@@ -386,8 +394,17 @@ class Socket:
 
             waiters.append(_waiter)
             set_mode()
-            if _waiter():
-                waiters.remove(_waiter)
+            # Try once more immediately; if ready, remove from queue before returning.
+            # This must happen before we return the future to the caller.
+            # Catch ValueError in case drain callback already processed this waiter (race).
+            try:
+                if _waiter():
+                    # Successfully resolved, remove from queue so drain doesn't process it.
+                    waiters.remove(_waiter)
+            except ValueError:
+                # Queue might have been modified by drain callback (race condition).
+                # This is OK - drain already processed the waiter and marked it done.
+                pass
 
             return fut
 
