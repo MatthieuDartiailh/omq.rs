@@ -31,11 +31,14 @@ test = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
     "pyzmq>=25",
+    "tornado>=6",
 ]
 lint = ["ruff"]
+type-check = ["ty"]
 dev = [
   { include-group = "test" },
   { include-group = "lint" },
+  { include-group = "type-check" },
 ]
 
 [project.urls]
