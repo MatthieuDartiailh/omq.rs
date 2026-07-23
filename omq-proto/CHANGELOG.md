@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-23
+
+### Added
+
+- `Message::max_message_size_len()` for shared max-message-size accounting.
+
+### Changed
+
+- `Options::max_message_size` accounting now includes payload bytes plus one
+  internal payload slot per part. This bounds zero-length multipart floods
+  consistently across ZMTP and inproc transports.
+- Clarify that native OMQ sockets default to zero linger.
+
 ## [0.23.1] - 2026-07-22
 
 ### Changed

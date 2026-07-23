@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-07-23
+
+### Fixed
+
+- Context shutdown and socket close paths wake waiters through stateful
+  signals instead of raw notifications. This closes related lost-wakeup races
+  from issue #186.
+- `LocalCell` now binds app-facing socket access to the first calling thread
+  and panics before cross-thread mutation.
+- `ZMQ_LINGER` now reports libzmq-compatible default linger forever while
+  explicit `ZMQ_LINGER=0` still maps to zero-linger native close.
+- XPUB/XSUB libzmq tests now use finite linger and nonblocking negative
+  receives, avoiding Windows hangs.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.19.3 and `yring` to 0.3.10.
+
 ## [0.5.5] - 2026-07-22
 
 ### Added
