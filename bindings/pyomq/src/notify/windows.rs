@@ -69,6 +69,10 @@ impl WindowsWakeupState {
         self.hooks.set_mode(mode);
     }
 
+    fn clear_mode(&mut self, mode: u32) {
+        self.hooks.clear_mode(mode);
+    }
+
     fn begin_drain(&self) {
         self.draining.store(true, Ordering::Release);
     }
@@ -238,6 +242,11 @@ impl WindowsSignal {
             self.signal();
         }
     }
+
+    pub(crate) fn clear_wakeup_mode(&self, mode: u32) {
+        let mut state = self.state.lock().unwrap();
+        state.clear_mode(mode);
+    }
 }
 
 #[derive(Default)]
@@ -254,7 +263,19 @@ impl WakeupHooks {
     }
 
     fn set_mode(&mut self, mode: u32) {
-        self.mode.store(mode, Ordering::Relaxed);
+        if mode == 0 {
+            self.mode.store(0, Ordering::Relaxed);
+        } else {
+            self.mode.fetch_or(mode, Ordering::Relaxed);
+        }
+    }
+
+    fn clear_mode(&mut self, mode: u32) {
+        if mode == 0 {
+            self.mode.store(0, Ordering::Relaxed);
+        } else {
+            self.mode.fetch_and(!mode, Ordering::Relaxed);
+        }
     }
 }
 

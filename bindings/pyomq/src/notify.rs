@@ -105,6 +105,11 @@ impl ReadinessSignal {
         self.backend.set_wakeup_mode(mode);
     }
 
+    #[cfg(windows)]
+    pub fn clear_wakeup_mode(&self, mode: u32) {
+        self.backend.clear_wakeup_mode(mode);
+    }
+
     /// Permanently arm the signal so wakeups are emitted even when no
     /// thread is currently parked in the wait loop.
     pub fn arm_persistent(&self) {

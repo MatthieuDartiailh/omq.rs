@@ -770,6 +770,9 @@ class _ShadowSocket:
                         return result
             finally:
                 self._recv_waiter_pending = False
+                self._async_socket._clear_wakeup_modes(
+                    recv_mode=_WAKEUP_MODE_SYNC,
+                )
     else:
 
         def _blocking_recv(self, try_fn):
@@ -857,6 +860,9 @@ class _ShadowSocket:
                             raise error.from_native(e) from None
             finally:
                 self._send_waiter_pending = False
+                self._async_socket._clear_wakeup_modes(
+                    send_mode=_WAKEUP_MODE_SYNC,
+                )
     else:
 
         def _blocking_send(self, send_fn):

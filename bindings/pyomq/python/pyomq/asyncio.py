@@ -324,9 +324,13 @@ class Socket:
         def _set_wakeup_modes(self, *, recv_mode=None, send_mode=None):
             self._sock._set_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
 
+        def _clear_wakeup_modes(self, *, recv_mode=None, send_mode=None):
+            self._sock._clear_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
+
         def _schedule_recv_drain(self):
             loop = self._loop
             if loop is None or loop.is_closed():
+                self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_recv_drain_complete()
                 return
             loop.call_soon_threadsafe(self._drain_recv_waiters)
@@ -334,6 +338,7 @@ class Socket:
         def _schedule_send_drain(self):
             loop = self._loop
             if loop is None or loop.is_closed():
+                self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_send_drain_complete()
                 return
             loop.call_soon_threadsafe(self._drain_send_waiters)
@@ -350,6 +355,10 @@ class Socket:
                 # the end of the try block and the call to _mark_recv_drain_complete.
                 while waiters and waiters[0]():
                     waiters.popleft()
+                if waiters:
+                    self._set_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
+                else:
+                    self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
 
         def _drain_send_waiters(self):
             """Invoke each waiter until one returns False (not ready)."""
@@ -360,11 +369,15 @@ class Socket:
             finally:
                 self._sock._mark_send_drain_complete()
                 # Ensure we drain any notification that arrived in between
-                # the end of the try block and the call to _mark_recv_drain_complete.
+                # the end of the try block and the call to _mark_send_drain_complete.
                 while waiters and waiters[0]():
                     waiters.popleft()
+                if waiters:
+                    self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
+                else:
+                    self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
 
-        def _add_waitable(self, try_fn, waiters, set_mode):
+        def _add_waitable(self, try_fn, waiters, set_mode, clear_mode):
             """Register a Windows waiter that resolves when try_fn returns
             non-None. try_fn must return None when not ready and raise on
             real errors."""
@@ -405,6 +418,8 @@ class Socket:
                 # Queue might have been modified by drain callback (race condition).
                 # This is OK - drain already processed the waiter and marked it done.
                 pass
+            if not waiters:
+                clear_mode()
 
             return fut
 
@@ -419,6 +434,7 @@ class Socket:
                 safe_try,
                 self._recv_waiters,
                 lambda: self._set_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC),
+                lambda: self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC),
             )
 
         def _send_with_backpressure(self, data, flags):
@@ -435,6 +451,7 @@ class Socket:
                 try_send,
                 self._send_waiters,
                 lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
+                lambda: self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
             )
 
         def _send_multipart_with_backpressure(self, parts, flags):
@@ -451,6 +468,7 @@ class Socket:
                 try_send,
                 self._send_waiters,
                 lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
+                lambda: self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
             )
     else:
 

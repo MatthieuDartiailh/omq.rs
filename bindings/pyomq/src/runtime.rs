@@ -168,6 +168,7 @@ impl ContextInner {
                 let mut batch = 0u32;
                 while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                     let _ = send_socket.send(msg).await;
+                    send_cons.as_mut().get_mut().release();
                     send_ready.signal();
                     batch += 1;
                     if batch >= SEND_YIELD_INTERVAL {

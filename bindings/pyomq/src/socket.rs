@@ -35,6 +35,7 @@ use std::sync::atomic::AtomicU32;
 static FORK_GEN: AtomicU32 = AtomicU32::new(0);
 static PARENT_FORK_GEN: AtomicU32 = AtomicU32::new(0);
 static FORKED: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
 #[cfg(unix)]
@@ -314,6 +315,7 @@ impl SocketInner {
         let materialized = self.materialized.write().unwrap().take();
         if let Some(ref state) = materialized {
             state.recv_ready.force_wake();
+            state.send_ready.force_wake();
         }
         materialized
     }
@@ -358,6 +360,19 @@ impl SocketInner {
             }
             if let Some(mode) = send_mode {
                 materialized.send_ready.set_wakeup_mode(mode);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn clear_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            if let Some(mode) = recv_mode {
+                materialized.recv_ready.clear_wakeup_mode(mode);
+            }
+            if let Some(mode) = send_mode {
+                materialized.send_ready.clear_wakeup_mode(mode);
             }
         }
     }
