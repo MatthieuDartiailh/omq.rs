@@ -207,6 +207,47 @@ impl AsyncSocket {
         )))
     }
 
+    #[cfg(windows)]
+    #[pyo3(name = "_set_wakeup_hooks")]
+    #[pyo3(signature = (recv_async = None, recv_event = None, send_async = None, send_event = None))]
+    fn set_wakeup_hooks(
+        &self,
+        recv_async: Option<&Bound<'_, PyAny>>,
+        recv_event: Option<&Bound<'_, PyAny>>,
+        send_async: Option<&Bound<'_, PyAny>>,
+        send_event: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.inner.set_wakeup_hooks(
+            recv_async.map(|cb| cb.clone().unbind()),
+            recv_event.map(|event| event.clone().unbind()),
+            send_async.map(|cb| cb.clone().unbind()),
+            send_event.map(|event| event.clone().unbind()),
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_set_wakeup_modes")]
+    #[pyo3(signature = (recv_mode = None, send_mode = None))]
+    fn set_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) -> PyResult<()> {
+        self.inner.set_wakeup_modes(recv_mode, send_mode);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_mark_recv_drain_complete")]
+    fn mark_recv_drain_complete(&self) -> PyResult<()> {
+        self.inner.mark_recv_wakeup_drain_complete();
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_mark_send_drain_complete")]
+    fn mark_send_drain_complete(&self) -> PyResult<()> {
+        self.inner.mark_send_wakeup_drain_complete();
+        Ok(())
+    }
+
     // ── Subscriptions / groups (sync) ───────────────────────────────
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {

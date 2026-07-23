@@ -329,6 +329,54 @@ impl SocketInner {
             options::duration_from_millis,
         )
     }
+
+    #[cfg(windows)]
+    pub fn set_wakeup_hooks(
+        &self,
+        recv_async: Option<Py<PyAny>>,
+        recv_event: Option<Py<PyAny>>,
+        send_async: Option<Py<PyAny>>,
+        send_event: Option<Py<PyAny>>,
+    ) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized
+                .recv_ready
+                .set_wakeup_hooks(recv_async, recv_event);
+            materialized
+                .send_ready
+                .set_wakeup_hooks(send_async, send_event);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            if let Some(mode) = recv_mode {
+                materialized.recv_ready.set_wakeup_mode(mode);
+            }
+            if let Some(mode) = send_mode {
+                materialized.send_ready.set_wakeup_mode(mode);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn mark_recv_wakeup_drain_complete(&self) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized.recv_ready.mark_drain_complete();
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn mark_send_wakeup_drain_complete(&self) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized.send_ready.mark_drain_complete();
+        }
+    }
 }
 
 /// Monitor event stream returned by `Socket.monitor()`. Delivers

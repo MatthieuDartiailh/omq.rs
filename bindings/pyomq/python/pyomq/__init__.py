@@ -19,6 +19,7 @@ import json
 import os
 import pickle
 import select as _select
+import sys
 import threading
 import weakref
 
@@ -113,6 +114,10 @@ POLLOUT = 2
 POLLERR = 4
 POLLPRI = 32
 HWM = 1
+_WAKEUP_MODE_NONE = 0
+_WAKEUP_MODE_ASYNC = 1
+_WAKEUP_MODE_SYNC = 2
+_IS_WINDOWS = sys.platform == "win32"
 
 ROUTING_ID = 5
 LAST_ENDPOINT = 32
@@ -646,6 +651,11 @@ class _ShadowSocket:
         self._context = async_socket._context
         self._closed = False
         self._last_endpoint = async_socket._last_endpoint
+        if _IS_WINDOWS:
+            self._recv_waiter_pending = False
+            self._send_waiter_pending = False
+            self._recv_wakeup_event = async_socket._recv_wakeup_event
+            self._send_wakeup_event = async_socket._send_wakeup_event
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -701,16 +711,49 @@ class _ShadowSocket:
     def get(self, option):
         return self.getsockopt(option)
 
-    def _blocking_recv(self, try_fn):
-        try:
-            result = try_fn()
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        if result is not None:
-            return result
+    if _IS_WINDOWS:
 
-        fd = self._native._recv_fd()
-        try:
+        def _register_wakeup_hooks(self):
+            self._async_socket._register_wakeup_hooks()
+    else:
+
+        def _register_wakeup_hooks(self):
+            return None
+
+    if _IS_WINDOWS:
+
+        def _blocking_recv(self, try_fn):
+            if self._recv_waiter_pending:
+                raise RuntimeError(
+                    "cannot have more than one pending recv waiter on a shadow socket"
+                )
+            self._recv_waiter_pending = True
+            self._register_wakeup_hooks()
+            self._async_socket._set_wakeup_modes(
+                recv_mode=_WAKEUP_MODE_SYNC,
+            )
+            try:
+                try:
+                    result = try_fn()
+                except _native.ZMQError as e:
+                    raise error.from_native(e) from None
+                if result is not None:
+                    return result
+
+                while True:
+                    self._recv_wakeup_event.clear()
+                    self._recv_wakeup_event.wait()
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
+            finally:
+                self._recv_waiter_pending = False
+    else:
+
+        def _blocking_recv(self, try_fn):
             try:
                 result = try_fn()
             except _native.ZMQError as e:
@@ -718,20 +761,29 @@ class _ShadowSocket:
             if result is not None:
                 return result
 
-            while True:
-                _select.select([fd], [], [])
-                try:
-                    os.read(fd, 8)
-                except OSError:
-                    pass
+            fd = self._native._recv_fd()
+            try:
                 try:
                     result = try_fn()
                 except _native.ZMQError as e:
                     raise error.from_native(e) from None
                 if result is not None:
                     return result
-        finally:
-            os.close(fd)
+
+                while True:
+                    _select.select([fd], [], [])
+                    try:
+                        os.read(fd, 8)
+                    except OSError:
+                        pass
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
+            finally:
+                os.close(fd)
 
     def recv(self, flags=0, copy=True, track=False):
         data = self._blocking_recv(self._native._try_recv)
@@ -759,16 +811,40 @@ class _ShadowSocket:
         if track:
             return MessageTracker(_pending=True)
 
-    def _blocking_send(self, send_fn):
-        try:
-            send_fn()
-            return
-        except _native.ZMQError as e:
-            if getattr(e, "errno", None) != _errno.EAGAIN:
-                raise error.from_native(e) from None
+    if _IS_WINDOWS:
 
-        fd = self._native._send_fd()
-        try:
+        def _blocking_send(self, send_fn):
+            if self._send_waiter_pending:
+                raise RuntimeError(
+                    "cannot have more than one pending send waiter on a shadow socket"
+                )
+            self._send_waiter_pending = True
+            self._register_wakeup_hooks()
+            self._async_socket._set_wakeup_modes(
+                send_mode=_WAKEUP_MODE_SYNC,
+            )
+            try:
+                try:
+                    send_fn()
+                    return
+                except _native.ZMQError as e:
+                    if getattr(e, "errno", None) != _errno.EAGAIN:
+                        raise error.from_native(e) from None
+
+                while True:
+                    self._send_wakeup_event.clear()
+                    self._send_wakeup_event.wait()
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
+            finally:
+                self._send_waiter_pending = False
+    else:
+
+        def _blocking_send(self, send_fn):
             try:
                 send_fn()
                 return
@@ -776,20 +852,29 @@ class _ShadowSocket:
                 if getattr(e, "errno", None) != _errno.EAGAIN:
                     raise error.from_native(e) from None
 
-            while True:
-                _select.select([fd], [], [])
-                try:
-                    os.read(fd, 8)
-                except OSError:
-                    pass
+            fd = self._native._send_fd()
+            try:
                 try:
                     send_fn()
                     return
                 except _native.ZMQError as e:
                     if getattr(e, "errno", None) != _errno.EAGAIN:
                         raise error.from_native(e) from None
-        finally:
-            os.close(fd)
+
+                while True:
+                    _select.select([fd], [], [])
+                    try:
+                        os.read(fd, 8)
+                    except OSError:
+                        pass
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
+            finally:
+                os.close(fd)
 
     def close(self, linger=None):
         pass

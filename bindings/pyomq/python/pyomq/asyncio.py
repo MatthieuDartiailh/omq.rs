@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import pickle
+import threading
 import weakref
 
 from . import _native  # type: ignore[attr-defined]
@@ -167,6 +168,13 @@ class Socket:
         self._context = _context
         self._closed = False
         self._last_endpoint = None
+        if _IS_WINDOWS:
+            self._loop = None
+            self._recv_waiters = None
+            self._send_waiters = None
+            self._recv_wakeup_event = threading.Event()
+            self._send_wakeup_event = threading.Event()
+            self._wakeup_registered = False
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -438,6 +446,23 @@ class Socket:
             return self._sock.leave(group)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+
+    # ── Windows wakeup integration ───────────────────────────────────
+
+    if _IS_WINDOWS:
+
+        def _register_wakeup_hooks(self):
+            if not self._wakeup_registered:
+                self._sock._set_wakeup_hooks(
+                    recv_async=None,
+                    recv_event=self._recv_wakeup_event,
+                    send_async=None,
+                    send_event=self._send_wakeup_event,
+                )
+                self._wakeup_registered = True
+
+        def _set_wakeup_modes(self, *, recv_mode=None, send_mode=None):
+            self._sock._set_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
