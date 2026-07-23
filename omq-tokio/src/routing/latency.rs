@@ -143,9 +143,9 @@ impl Submitter {
                     Err(TrySendError::Closed) => return Err(Error::Closed),
                 }
             };
-            let notified = notified.notified();
+            let seen = notified.generation();
+            let notified = notified.changed_after(seen);
             tokio::pin!(notified);
-            notified.as_mut().enable();
             match self.try_send(msg) {
                 Ok(()) => return Ok(()),
                 Err(TrySendError::Full(returned)) => msg = returned,
@@ -173,7 +173,8 @@ impl Submitter {
             }
         };
         if let Some(notified) = notified {
-            notified.notified().await;
+            let seen = notified.generation();
+            notified.changed_after(seen).await;
         } else if self.queue.len() != 0 {
             self.queue.wait_space_available().await;
         } else {

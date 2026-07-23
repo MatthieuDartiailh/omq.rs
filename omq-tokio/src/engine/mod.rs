@@ -19,3 +19,4 @@ pub use driver::{
     RecvSinkConfig, YringSink,
 };
 pub(crate) use send_pipe::{SendPipeConsumer, SendPipeError, SendPipeProducer, send_pipe};
+pub use signal::StateSignal;

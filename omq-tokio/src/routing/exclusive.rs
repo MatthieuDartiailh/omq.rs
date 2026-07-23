@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Notify;
-
+use crate::engine::signal::StateSignal;
 use crate::engine::{PeerDriverHandle, SendPipeError, SendPipeProducer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -10,7 +9,7 @@ use omq_proto::message::Message;
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
     pipe: Arc<Mutex<Option<SendPipeProducer>>>,
-    peer_ready: Arc<Notify>,
+    peer_ready: Arc<StateSignal>,
     closed: Arc<AtomicBool>,
 }
 
@@ -18,7 +17,7 @@ impl Submitter {
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         *self.pipe.lock().expect("exclusive pipe") = None;
-        self.peer_ready.notify_waiters();
+        self.peer_ready.notify_changed();
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -36,9 +35,9 @@ impl Submitter {
             };
 
             if let Some(space) = space {
-                let notified = space.notified();
+                let seen = space.generation();
+                let notified = space.changed_after(seen);
                 tokio::pin!(notified);
-                notified.as_mut().enable();
                 match self.try_send(msg) {
                     Ok(()) => return Ok(()),
                     Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
@@ -49,9 +48,9 @@ impl Submitter {
                 continue;
             }
 
-            let notified = self.peer_ready.notified();
+            let seen = self.peer_ready.generation();
+            let notified = self.peer_ready.changed_after(seen);
             tokio::pin!(notified);
-            notified.as_mut().enable();
             match self.try_send(msg) {
                 Ok(()) => return Ok(()),
                 Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
@@ -69,9 +68,11 @@ impl Submitter {
         };
 
         if let Some(space) = space {
-            space.notified().await;
+            let seen = space.generation();
+            space.changed_after(seen).await;
         } else {
-            self.peer_ready.notified().await;
+            let seen = self.peer_ready.generation();
+            self.peer_ready.changed_after(seen).await;
         }
     }
 
@@ -89,7 +90,7 @@ impl Submitter {
                 Err(SendPipeError::Full(m)) => Err(omq_proto::error::TrySendError::Full(m)),
                 Err(SendPipeError::Closed(m)) => {
                     *guard = None;
-                    self.peer_ready.notify_waiters();
+                    self.peer_ready.notify_changed();
                     Err(omq_proto::error::TrySendError::Full(m))
                 }
             },
@@ -101,7 +102,7 @@ impl Submitter {
 #[derive(Debug)]
 pub(crate) struct ExclusiveSend {
     pipe: Arc<Mutex<Option<SendPipeProducer>>>,
-    peer_ready: Arc<Notify>,
+    peer_ready: Arc<StateSignal>,
     closed: Arc<AtomicBool>,
 }
 
@@ -109,7 +110,7 @@ impl ExclusiveSend {
     pub(crate) fn new() -> Self {
         Self {
             pipe: Arc::new(Mutex::new(None)),
-            peer_ready: Arc::new(Notify::new()),
+            peer_ready: Arc::new(StateSignal::new()),
             closed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -129,17 +130,18 @@ impl ExclusiveSend {
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("exclusive send pipe").take());
         *self.pipe.lock().expect("exclusive pipe") = send_pipe;
-        self.peer_ready.notify_waiters();
+        self.peer_ready.notify_changed();
     }
 
     pub(crate) fn connection_removed(&mut self, _peer_id: u64) {
         *self.pipe.lock().expect("exclusive pipe") = None;
+        self.peer_ready.notify_changed();
     }
 
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         *self.pipe.lock().expect("exclusive pipe") = None;
-        self.peer_ready.notify_waiters();
+        self.peer_ready.notify_changed();
     }
 
     pub(crate) fn is_drained(&self) -> bool {

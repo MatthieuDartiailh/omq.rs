@@ -56,6 +56,9 @@ tokio = { version = "1.52.0", features = ["test-util", "rt-multi-thread"] }
 rcgen = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+[target.'cfg(target_pointer_width = "64")'.dev-dependencies]
+loom = "0.7"
+
 [[bin]]
 name = "omq_bench_peer_tokio"
 path = "src/bin/bench_peer_tokio.rs"
@@ -180,6 +183,10 @@ path = "tests/inproc_rebind.rs"
 [[test]]
 name = "omq_inproc_recv_race"
 path = "tests/inproc_recv_race.rs"
+
+[[test]]
+name = "omq_loom_signal"
+path = "tests/loom_signal.rs"
 
 [[test]]
 name = "omq_inproc_subside"
@@ -340,6 +347,10 @@ path = "tests/pub_sub.rs"
 [[test]]
 name = "omq_push_pull"
 path = "tests/push_pull.rs"
+
+[[test]]
+name = "omq_raw_notify_ban"
+path = "tests/raw_notify_ban.rs"
 
 [[test]]
 name = "omq_radio_dish"

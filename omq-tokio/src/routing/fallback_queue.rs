@@ -11,6 +11,7 @@ use std::sync::Arc;
 use concurrent_queue::{ConcurrentQueue, PushError};
 use tokio::sync::Semaphore;
 
+use crate::engine::signal::StateSignal;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::OnMute;
@@ -20,7 +21,7 @@ use crate::engine::signal::DataSignal;
 struct Inner {
     queue: ConcurrentQueue<Message>,
     data_signal: DataSignal,
-    space_available: tokio::sync::Notify,
+    space_available: StateSignal,
     slots: Option<Semaphore>,
 }
 
@@ -64,7 +65,7 @@ impl FallbackQueue {
         let inner = Arc::new(Inner {
             queue,
             data_signal: DataSignal::new(),
-            space_available: tokio::sync::Notify::new(),
+            space_available: StateSignal::new(),
             slots,
         });
         let receiver = FallbackReceiver {
@@ -157,12 +158,17 @@ impl FallbackQueue {
         self.inner.queue.is_closed()
     }
 
-    pub(crate) fn space_notified(&self) -> tokio::sync::futures::Notified<'_> {
-        self.inner.space_available.notified()
+    pub(crate) fn space_generation(&self) -> u64 {
+        self.inner.space_available.generation()
+    }
+
+    pub(crate) async fn wait_space_changed_after(&self, seen: u64) {
+        self.inner.space_available.changed_after(seen).await;
     }
 
     pub(crate) async fn wait_space_available(&self) {
-        self.inner.space_available.notified().await;
+        let seen = self.space_generation();
+        self.inner.space_available.changed_after(seen).await;
     }
 
     pub(crate) fn shutdown(&self) {
@@ -177,7 +183,7 @@ impl FallbackQueue {
             slots.add_permits(drained);
         }
         self.inner.data_signal.wake_all();
-        self.inner.space_available.notify_waiters();
+        self.inner.space_available.notify_changed();
     }
 }
 
@@ -195,17 +201,16 @@ impl FallbackReceiver {
             slots.add_permits(n);
         }
         if n > 0 {
-            self.inner.space_available.notify_waiters();
+            self.inner.space_available.notify_changed();
         }
     }
 
     /// Complete one consumer drain pass. This clears the coalesced signal
     /// and rearms it if producers filled the queue during the drain.
     pub(crate) fn finish_drain(&self) {
-        self.inner.data_signal.clear();
         self.inner
             .data_signal
-            .rearm_if_nonempty(self.inner.queue.is_empty());
+            .clear_after(self.inner.queue.is_empty());
     }
 
     /// Fair share of the current queue for one driver.
@@ -224,18 +229,24 @@ impl FallbackReceiver {
     }
 
     /// Async pop. Waits until a message is available or the queue is closed.
+    #[cfg(test)]
     pub(crate) async fn recv(&self) -> Option<Message> {
+        self.recv_with_drain().await
+    }
+
+    pub(crate) async fn recv_with_drain(&self) -> Option<Message> {
         loop {
-            let notified = self.inner.data_signal.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
+            self.inner.data_signal.begin_drain();
             if let Some(msg) = self.try_pop() {
                 return Some(msg);
             }
             if self.inner.queue.is_closed() && self.inner.queue.is_empty() {
                 return None;
             }
-            notified.await;
+            self.inner
+                .data_signal
+                .clear_after(self.inner.queue.is_empty());
+            self.inner.data_signal.ready().await;
         }
     }
 }
@@ -297,7 +308,7 @@ mod tests {
     async fn recv_wakes_after_empty_refill() {
         let (q, rx) = FallbackQueue::new(2, OnMute::Block);
         q.send(Message::single("a")).await.unwrap();
-        let got = rx.recv().await.unwrap();
+        let got = rx.recv_with_drain().await.unwrap();
         assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
         rx.release_permits(1);
         rx.finish_drain();

@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tokio::sync::Notify;
 
 use crate::engine::signal::DataSignal;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
@@ -79,7 +78,7 @@ struct LanePeer {
 
 struct LaneEndpoint {
     ctrl_tx: yring::Producer<LaneControl>,
-    ctrl_notify: Arc<Notify>,
+    ctrl_notify: Arc<DataSignal>,
     peer_count: usize,
 }
 
@@ -146,7 +145,7 @@ struct LaneWorker {
     data_rx: yring::Consumer<LaneDispatch>,
     ctrl_rx: yring::Consumer<LaneControl>,
     data_signal: Arc<DataSignal>,
-    ctrl_notify: Arc<Notify>,
+    ctrl_notify: Arc<DataSignal>,
     mode: FanOutMode,
     lossy: bool,
     peers: FxHashMap<u64, LanePeer>,
@@ -196,7 +195,7 @@ impl FanOutLanes {
         let mut ctrl_channels: Vec<_> = (0..lane_count)
             .map(|_| {
                 let (tx, rx) = yring::spsc(LANE_CTRL_RING_CAP);
-                let notify = Arc::new(Notify::new());
+                let notify = Arc::new(DataSignal::new());
                 (tx, rx, notify)
             })
             .collect();
@@ -294,13 +293,13 @@ impl FanOutLanes {
             match endpoint.ctrl_tx.push(cmd) {
                 Ok(()) => {
                     endpoint.ctrl_tx.flush();
-                    endpoint.ctrl_notify.notify_one();
+                    endpoint.ctrl_notify.mark();
                     return;
                 }
                 Err(returned) => {
                     cmd = returned;
                     endpoint.ctrl_tx.flush();
-                    endpoint.ctrl_notify.notify_one();
+                    endpoint.ctrl_notify.mark();
                     std::thread::yield_now();
                 }
             }
@@ -420,6 +419,8 @@ impl LaneWorker {
         loop {
             let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
             let mut shutdown = false;
+            self.ctrl_notify.begin_drain();
+            self.data_signal.begin_drain();
 
             // 1. ALL control commands, unconditionally.
             self.ctrl_rx.prefetch();
@@ -429,6 +430,7 @@ impl LaneWorker {
                 }
             }
             self.ctrl_rx.release();
+            self.ctrl_notify.clear_after(self.ctrl_rx.is_empty());
 
             if shutdown {
                 self.flush_touched(&mut touched);
@@ -478,14 +480,13 @@ impl LaneWorker {
 
             self.flush_touched(&mut touched);
             if drained {
-                self.data_signal.clear();
-                self.data_signal.rearm_if_nonempty(self.data_rx.is_empty());
+                self.data_signal.clear_after(self.data_rx.is_empty());
                 tokio::task::yield_now().await;
                 continue;
             }
             tokio::select! {
-                () = self.ctrl_notify.notified() => {}
-                () = self.data_signal.notified() => {}
+                () = self.ctrl_notify.ready() => {}
+                () = self.data_signal.ready() => {}
             }
         }
     }
@@ -714,9 +715,9 @@ impl LaneWorker {
                     return false;
                 }
                 TryFrameResult::Full => {
-                    let notified = peer.slot.space_available.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
+                    let seen = peer.slot.space_available.generation();
+                    let changed = peer.slot.space_available.changed_after(seen);
+                    tokio::pin!(changed);
                     peer.slot.signal_encoded();
                     let result = match frame {
                         FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
@@ -728,7 +729,7 @@ impl LaneWorker {
                             return true;
                         }
                         TryFrameResult::Dead => return false,
-                        TryFrameResult::Full => notified.await,
+                        TryFrameResult::Full => changed.await,
                         TryFrameResult::Ineligible => {
                             unreachable!("pre-framed fanout push cannot be ineligible")
                         }
@@ -757,8 +758,6 @@ impl LaneWorker {
 mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
-
-    use tokio::sync::Notify;
 
     use super::{
         FanOutLaneState, FanOutLanes, LaneDispatch, LaneDistributor, LaneEndpoint, LanePeerAdd,
@@ -835,7 +834,7 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = yring::spsc(4);
         LaneEndpoint {
             ctrl_tx,
-            ctrl_notify: Arc::new(Notify::new()),
+            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
             peer_count: 0,
         }
     }

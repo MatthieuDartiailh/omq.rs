@@ -11,10 +11,9 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use omq_tokio::SocketType;
 use omq_tokio::endpoint::{Endpoint, Host};
+use omq_tokio::engine::StateSignal;
 
 use std::os::raw::c_char;
-
-use tokio::sync::Notify;
 
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
@@ -77,7 +76,7 @@ pub(crate) struct OmqSocket {
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
     /// Backpressure: recv pump waits on this when the recv ring is full.
-    pub recv_space: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    pub recv_space: std::sync::OnceLock<Arc<StateSignal>>,
     /// Shared config for recycling the recv fast yring on peer churn.
     pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
@@ -328,7 +327,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
         pump: pump_cons,
     });
 
-    let recv_space = Arc::new(tokio::sync::Notify::new());
+    let recv_space = Arc::new(StateSignal::new());
     let _ = sock.recv_space.set(recv_space.clone());
 
     // Build the RecvSink::Yring for the driver's direct fast path.
@@ -738,7 +737,7 @@ async fn push_to_pump(
     prod: &mut yring::Producer<omq_tokio::engine::RecvItem>,
     msg: omq_tokio::Message,
     recv_notify: RecvNotify,
-    space: &Notify,
+    space: &StateSignal,
 ) {
     let flush_signal = |prod: &mut yring::Producer<omq_tokio::engine::RecvItem>| {
         if let yring::FlushResult::Flushed {
@@ -757,9 +756,9 @@ async fn push_to_pump(
             }
             Err(returned) => {
                 m = returned.into_message();
-                let notified = space.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
+                let seen = space.generation();
+                let changed = space.changed_after(seen);
+                tokio::pin!(changed);
                 match prod.push(omq_tokio::engine::RecvItem::new(m)) {
                     Ok(()) => {
                         flush_signal(prod);
@@ -767,7 +766,7 @@ async fn push_to_pump(
                     }
                     Err(returned2) => {
                         m = returned2.into_message();
-                        notified.await;
+                        changed.await;
                     }
                 }
             }

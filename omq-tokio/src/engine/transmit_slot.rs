@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use tokio::sync::Notify;
 
-use super::signal::DataSignal;
+use super::signal::{DataSignal, StateSignal};
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::handle_frame::{
     HandleFrameCaps, HandleFrameDecision, HandleFrameState, decide_handle_frame,
@@ -39,7 +38,7 @@ pub(crate) struct PeerTransmitSlot {
     cap: usize,
     msg_cap: usize,
     pub(crate) data_signal: DataSignal,
-    pub(crate) space_available: Arc<Notify>,
+    pub(crate) space_available: Arc<StateSignal>,
     pub(crate) handshake_done: AtomicBool,
     pub(crate) has_transform: bool,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
@@ -92,7 +91,7 @@ impl PeerTransmitSlot {
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),
-            space_available: Arc::new(Notify::new()),
+            space_available: Arc::new(StateSignal::new()),
             handshake_done: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
@@ -243,6 +242,7 @@ impl PeerTransmitSlot {
         }
         out.extend_from_slice(eq.arena_bytes());
         eq.clear_arena();
+        self.data_signal.begin_drain();
         drop(eq);
 
         self.queued_msgs.store(0, Ordering::Relaxed);
@@ -280,6 +280,7 @@ impl PeerTransmitSlot {
         }
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
+        self.data_signal.begin_drain();
         drop(eq);
 
         if eq_empty {
@@ -293,7 +294,7 @@ impl PeerTransmitSlot {
         let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
         if space_available {
-            self.space_available.notify_waiters();
+            self.space_available.notify_changed();
         }
         if below_lwm
             && self
@@ -319,6 +320,7 @@ impl PeerTransmitSlot {
         let eq_drained_chunks = buf.len() - before_chunks;
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
+        self.data_signal.begin_drain();
         drop(eq);
 
         if eq_drained_chunks > 0 {
@@ -358,8 +360,7 @@ impl PeerTransmitSlot {
     }
 
     fn clear_data_signal_and_rearm(&self) {
-        self.data_signal.clear();
-        self.data_signal.rearm_if_nonempty(self.is_empty());
+        self.data_signal.clear_after(self.is_empty());
     }
 
     pub(crate) fn mark_dead(&self) {
@@ -372,7 +373,7 @@ impl PeerTransmitSlot {
         self.fanout_active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
         self.data_signal.wake_all();
-        self.space_available.notify_waiters();
+        self.space_available.notify_changed();
     }
 
     fn is_full(&self, eq: &FrameBuffer) -> bool {
@@ -435,12 +436,12 @@ mod tests {
         let msg = Message::from("x");
 
         assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
-        timeout(Duration::from_secs(1), slot.data_signal.notified())
+        timeout(Duration::from_secs(1), slot.data_signal.ready())
             .await
             .expect("initial encode should notify");
 
         slot.clear_data_signal_and_rearm();
-        timeout(Duration::from_secs(1), slot.data_signal.notified())
+        timeout(Duration::from_secs(1), slot.data_signal.ready())
             .await
             .expect("nonempty slot should rearm after clear");
     }

@@ -25,32 +25,42 @@ use omq_proto::error::{Error, Result};
 use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::proto::SocketType;
 
-use crate::engine::signal::DataSignal;
+use crate::engine::signal::{DataSignal, StateSignal};
 use crate::socket::recv::RecvItem;
 
 /// Sender-side SPSC state for inproc fast path.
 #[derive(Debug)]
 pub(crate) struct BlockingSpace {
-    wait: StdMutex<()>,
+    // Guarded generation closes the check-then-park race around Condvar.
+    generation: StdMutex<u64>,
     changed: Condvar,
 }
 
 impl BlockingSpace {
     pub(crate) fn new() -> Self {
         Self {
-            wait: StdMutex::new(()),
+            generation: StdMutex::new(0),
             changed: Condvar::new(),
         }
     }
 
     pub(crate) fn notify(&self) {
+        let mut generation = self.generation.lock().unwrap();
+        *generation = generation.wrapping_add(1);
+        drop(generation);
         self.changed.notify_all();
     }
 
     pub(crate) fn wait_until(&self, mut is_full: impl FnMut() -> bool) {
-        let mut guard = self.wait.lock().unwrap();
         while is_full() {
-            guard = self.changed.wait(guard).unwrap();
+            let mut generation = self.generation.lock().unwrap();
+            if !is_full() {
+                return;
+            }
+            let seen = *generation;
+            while seen == *generation && is_full() {
+                generation = self.changed.wait(generation).unwrap();
+            }
         }
     }
 }
@@ -63,7 +73,7 @@ pub struct InprocTx {
     pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
-    pub space_notify: Arc<tokio::sync::Notify>,
+    pub space_notify: Arc<StateSignal>,
     pub(crate) blocking_space: Arc<BlockingSpace>,
     pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
 }
@@ -82,7 +92,7 @@ pub struct InprocRx {
     pub batch_remaining: std::sync::atomic::AtomicUsize,
     pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
-    pub space_notify: Arc<tokio::sync::Notify>,
+    pub space_notify: Arc<StateSignal>,
     pub(crate) blocking_space: Arc<BlockingSpace>,
 }
 
@@ -305,7 +315,7 @@ impl InprocListener {
                 recv_notify: notify,
                 recv_ready: ready.clone(),
                 max_message_size: mms,
-                space_notify: Arc::new(tokio::sync::Notify::new()),
+                space_notify: Arc::new(StateSignal::new()),
                 blocking_space: blocking_space.clone(),
                 blocking_recv_waker: if listener_is_recv {
                     Arc::clone(&self.blocking_recv_waker)
@@ -366,6 +376,19 @@ mod tests {
 
     fn waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
         crate::socket::recv::BlockingRecvWaker::new()
+    }
+
+    #[test]
+    fn blocking_space_rechecks_before_parking() {
+        let space = BlockingSpace::new();
+        let mut calls = 0usize;
+
+        space.wait_until(|| {
+            calls += 1;
+            calls == 1
+        });
+
+        assert_eq!(calls, 2);
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use super::{
     ZmtpConnection, max_peer_count, mpsc,
 };
 use crate::engine::send_pipe::SendPipeProducerHandle;
+use crate::engine::signal::StateSignal;
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer::{InprocDriverCtx, inproc_peer_driver};
 use omq_proto::WorkloadProfile;
@@ -482,7 +483,7 @@ fn attach_yring_recv_bypass(
             let (prod, cons) = yring::spsc(cap);
             let recv_notify = socket.spsc.recv_notify.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();
-            let space = Arc::new(tokio::sync::Notify::new());
+            let space = Arc::new(StateSignal::new());
             let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
                 producer: prod,
                 signal: Box::new(move || {

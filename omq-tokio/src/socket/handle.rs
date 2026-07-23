@@ -900,16 +900,16 @@ impl Socket {
                     ..
                 } => {
                     msg = returned;
-                    let notified = space.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
+                    let seen = space.generation();
+                    let changed = space.changed_after(seen);
+                    tokio::pin!(changed);
                     match self.inner.recv_rx.try_push_spsc_or_full(msg) {
                         SpscPush::Sent => return Ok(()),
                         SpscPush::Unavailable(returned) => {
                             return self.inner.send_submitter.send(returned).await;
                         }
                         SpscPush::Full { msg: returned, .. } => {
-                            notified.await;
+                            changed.await;
                             msg = returned;
                         }
                     }

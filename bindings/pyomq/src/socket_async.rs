@@ -117,7 +117,7 @@ impl AsyncSocket {
         let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
         let mut cons = mat.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
-            mat.recv_space.notify_one();
+            mat.recv_space.notify_changed();
             let mut parts: Vec<Bytes> = msg.iter().collect();
             let head = if parts.is_empty() {
                 Bytes::new()
@@ -146,7 +146,7 @@ impl AsyncSocket {
         let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
         let mut cons = mat.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
-            mat.recv_space.notify_one();
+            mat.recv_space.notify_changed();
             Ok(conversions::parts_to_pylist(py, msg)?.into_any())
         } else {
             Ok(py.None().bind(py).clone())
