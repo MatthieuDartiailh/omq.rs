@@ -8,8 +8,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Added
 
+- **Windows support for pyomq**
+  Compared to pyzmq pyomq can be used with the ProactorEventLoop
 - CI coverage for `i686-unknown-linux-gnu` and
   `armv7-unknown-linux-gnueabihf`.
+- ruff linting and ty type checking added to pyomq CI pipeline.
 
 ### Changed
 
