@@ -19,8 +19,8 @@ pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocRx>>>>;
 /// Single-peer send fast path ring. Actor sets/clears.
 pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocTx>>;
 
-/// Shared recv notification. All inproc producers notify this.
-pub(crate) type SpscRecvNotify = Arc<DataSignal>;
+/// Shared recv data signal. All inproc producers mark this.
+pub(crate) type SpscRecvSignal = Arc<DataSignal>;
 
 /// Notified by the actor when the consumers Vec changes. Wakes
 /// any `recv()` that's blocked so it re-drains with the updated list.
@@ -279,7 +279,7 @@ pub(crate) struct SpscHandles {
     pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
     pub send_ring_available: Arc<AtomicBool>,
-    pub recv_notify: SpscRecvNotify,
+    pub recv_signal: SpscRecvSignal,
     pub activated: SpscActivated,
     pub tcp_consumers: TcpConsumers,
     pub blocking_recv_waker: Arc<BlockingRecvWaker>,
@@ -292,7 +292,7 @@ impl SpscHandles {
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
             send_ring_available: Arc::new(AtomicBool::new(false)),
-            recv_notify: Arc::new(DataSignal::new()),
+            recv_signal: Arc::new(DataSignal::new()),
             activated: Arc::new(StateSignal::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
             blocking_recv_waker,
@@ -312,8 +312,8 @@ pub(crate) struct SpscAwareRecv {
     /// Generation counter. Bumped by the actor on any consumer add/remove
     /// (inproc or TCP).
     consumer_generation: SpscConsumerGeneration,
-    /// Shared recv notification. All drivers/senders notify this.
-    recv_notify: SpscRecvNotify,
+    /// Shared recv data signal. All drivers/senders mark this.
+    recv_signal: SpscRecvSignal,
     /// Notified when consumers Vec changes (new peer added).
     activated: SpscActivated,
     /// Single-peer send fast path ring (None when sender has >1 peer).
@@ -494,7 +494,7 @@ impl SpscAwareRecv {
             consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
             consumer_generation: handles.consumer_generation,
-            recv_notify: handles.recv_notify,
+            recv_signal: handles.recv_signal,
             activated: handles.activated,
             send_ring: handles.send_ring,
             send_ring_available: handles.send_ring_available,
@@ -559,7 +559,7 @@ impl SpscAwareRecv {
             return DrainResult::Message(msg);
         }
 
-        self.recv_notify.begin_drain();
+        self.recv_signal.begin_drain();
         self.recv_pipe_notify.begin_drain();
         self.refresh_snapshot(&mut guard);
 
@@ -574,7 +574,7 @@ impl SpscAwareRecv {
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
         if result.is_none()
             && Self::state_is_empty(state)
-            && (self.recv_notify.clear_after(Self::state_is_empty(state))
+            && (self.recv_signal.clear_after(Self::state_is_empty(state))
                 || self
                     .recv_pipe_notify
                     .clear_after(state.recv_consumer.is_empty()))
@@ -723,7 +723,7 @@ impl SpscAwareRecv {
                 DrainResult::Empty => {}
             }
 
-            let recv_ready = self.recv_notify.ready();
+            let recv_ready = self.recv_signal.ready();
             let pipe_ready = self.recv_pipe_notify.ready();
             let activated_seen = self.activated.generation();
             let activated = self.activated.changed_after(activated_seen);
@@ -817,7 +817,7 @@ impl SpscAwareRecv {
         }
         let _ = pair.producer.push(RecvItem::new(msg));
         pair.producer.flush();
-        pair.recv_notify.mark();
+        pair.recv_signal.mark();
         pair.blocking_recv_waker.wake();
         SpscPush::Sent
     }

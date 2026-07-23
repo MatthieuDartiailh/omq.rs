@@ -12,8 +12,8 @@ use crate::runtime::ContextInner;
 use crate::socket::Socket;
 use crate::socket_async::AsyncSocket;
 
-fn map_socket_type(st: i32) -> PyResult<omq_tokio::SocketType> {
-    Ok(match st {
+fn map_socket_type(socket_type_id: i32) -> PyResult<omq_tokio::SocketType> {
+    Ok(match socket_type_id {
         constants::PAIR => omq_tokio::SocketType::Pair,
         constants::PUB => omq_tokio::SocketType::Pub,
         constants::SUB => omq_tokio::SocketType::Sub,

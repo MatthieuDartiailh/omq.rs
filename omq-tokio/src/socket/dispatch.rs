@@ -403,7 +403,7 @@ impl AnyListener {
 pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_notify: &std::sync::Arc<DataSignal>,
+    recv_signal: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
@@ -438,7 +438,7 @@ pub(super) async fn bind_any(
         Endpoint::Inproc { name } => Ok(AnyListener::Inproc(inproc_transport::bind(
             name,
             snapshot.clone(),
-            recv_notify.clone(),
+            recv_signal.clone(),
             blocking_recv_waker.clone(),
             max_message_size,
         )?)),
@@ -451,7 +451,7 @@ pub(super) async fn bind_any(
 pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_notify: &std::sync::Arc<DataSignal>,
+    recv_signal: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] accept_invalid_certs: bool,
@@ -499,7 +499,7 @@ pub(super) async fn connect_any(
             let conn = inproc_transport::connect_with_max_message_size(
                 name,
                 snapshot.clone(),
-                recv_notify.clone(),
+                recv_signal.clone(),
                 blocking_recv_waker.clone(),
                 max_message_size,
             )

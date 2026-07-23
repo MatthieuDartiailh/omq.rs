@@ -81,7 +81,7 @@ because they're both consumers of the socket's internal recv channel.
 ### Send backpressure: eventfd park instead of spin
 
 When the send yring is full, the Python thread parked on an eventfd
-(`send_notify`) instead of spinning with `thread::yield_now()`. The
+(`send_ready`) instead of spinning with `thread::yield_now()`. The
 send pump signals the eventfd after each batch drain (every 256
 messages). No CPU waste under backpressure.
 
@@ -99,7 +99,7 @@ to always `multi_thread` with `worker_threads(n.max(1))`. The
 Handle::block_on dead end above was about removing the yring, not
 the runtime type.
 
-### Current: multi_thread + yring + yield_now() + batched send_notify: ~1.5M msg/s
+### Current: multi_thread + yring + yield_now() + batched send_ready: ~1.5M msg/s
 
 The yring relay avoids `block_on` entirely. Python does lock-free ring
 push/pop. Pump tasks on the tokio thread batch send/recv operations.
@@ -203,12 +203,12 @@ the send yring, inproc PUSH/PULL hung ~2-4% of the time.
 Fix: flush unconditionally wakes the consumer. One extra
 `AtomicWaker::wake()` per flush (a no-op when no waker is registered).
 
-### Recv pump: Notify instead of yield_now spin-loop
+### Recv pump: StateSignal instead of yield_now spin-loop
 
 The recv pump spun with `tokio::task::yield_now()` when the recv yring
 was full. Under specific timing this prevented forward progress.
-Replaced with `recv_space: tokio::sync::Notify` signaled by the Python
-consumer after each `prefetch_and_pop`. The recv pump awaits the Notify
+Replaced with `recv_space: StateSignal` signaled by the Python
+consumer after each `prefetch_and_pop`. The recv pump awaits the signal
 instead of spinning.
 
 ### Python _check_fork() removed from hot path

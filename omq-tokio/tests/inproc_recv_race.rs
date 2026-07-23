@@ -1,14 +1,14 @@
 //! Regression tests for c331369: lost-wakeup race and hang on inproc
 //! peer exit in tokio recv (`SpscAwareRecv`).
 //!
-//! Bug 1: `recv_notify.notified()` created after `try_drain_consumers()`
-//! returned empty. A `notify_one()` firing in that gap was lost.
+//! Bug 1: recv signal wait created after `try_drain_consumers()`
+//! returned empty. A wake firing in that gap was lost.
 //!
 //! Bug 2: inproc peer driver exit sent `PeerEvent::Closed` to the actor,
-//! but the receiver was stuck on `recv_notify.notified()` (biased first
+//! but the receiver was stuck on the recv signal wait (biased first
 //! in select) and never polled `self.rx`. Messages arriving via the
 //! actor path (from other peers) were invisible until a new inproc
-//! message happened to wake `recv_notify`.
+//! message happened to mark the recv signal.
 
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ fn tcp_ep() -> Endpoint {
 /// Bug 2: after an inproc peer exits, `recv()` must still be able to
 /// pick up messages arriving via the actor path (`self.rx`).
 ///
-/// Before the fix, `recv()` was stuck on `recv_notify.notified()` and
+/// Before the fix, `recv()` was stuck on the recv signal wait and
 /// never polled `self.rx`, so the TCP peer's message was invisible.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recv_after_inproc_peer_close_sees_tcp_messages() {
@@ -70,14 +70,14 @@ async fn recv_after_inproc_peer_close_sees_tcp_messages() {
 
     let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
-        .expect("pull.recv() hung after inproc peer closed (bug #2: recv stuck on recv_notify)")
+        .expect("pull.recv() hung after inproc peer closed (bug #2: recv stuck on recv signal)")
         .unwrap();
     assert_eq!(msg, Message::single("from-tcp"));
 }
 
 /// Bug 2 variant: after an inproc peer exits, messages from a second
-/// inproc peer (arriving via SPSC + `recv_notify`) must still be received.
-/// The recv loop must unblock from the stale `recv_notify` wait and
+/// inproc peer (arriving via SPSC + `recv_signal`) must still be received.
+/// The recv loop must unblock from the stale recv signal wait and
 /// re-drain consumers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recv_after_inproc_peer_close_sees_new_inproc_messages() {
@@ -113,8 +113,8 @@ async fn recv_after_inproc_peer_close_sees_new_inproc_messages() {
     assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"b");
 }
 
-/// Bug 1: lost wakeup when `notify_one()` fires between
-/// `try_drain_consumers()` returning empty and `notified()` future creation.
+/// Bug 1: lost wakeup when recv signal wait is armed after
+/// `try_drain_consumers()` already returned empty.
 /// Stress by sending many messages with interleaved yields.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn recv_no_lost_wakeup_under_rapid_sends() {

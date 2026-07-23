@@ -6,7 +6,7 @@ mod helpers;
 
 use std::ffi::{CString, c_void};
 use std::mem::size_of;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_recv,
@@ -20,6 +20,8 @@ const ZMQ_XSUB: i32 = 10;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
+const ZMQ_LINGER: i32 = 17;
+const ZMQ_DONTWAIT: i32 = 1;
 #[allow(dead_code)]
 const ZMQ_RCVMORE: i32 = 13;
 #[allow(dead_code)]
@@ -41,6 +43,16 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
     );
 }
 
+fn set_linger_zero(sock: *mut c_void) {
+    let ms: i32 = 0;
+    zmq_setsockopt(
+        sock,
+        ZMQ_LINGER,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+}
+
 fn get_type(sock: *mut c_void) -> i32 {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
@@ -54,6 +66,8 @@ fn xpub_xsub_basic() {
     let ctx = zmq_ctx_new();
     let xpub = zmq_socket(ctx, ZMQ_XPUB);
     let xsub = zmq_socket(ctx, ZMQ_XSUB);
+    set_linger_zero(xpub);
+    set_linger_zero(xsub);
     assert_eq!(get_type(xpub), ZMQ_XPUB);
     assert_eq!(get_type(xsub), ZMQ_XSUB);
 
@@ -89,6 +103,8 @@ fn xpub_receives_sub_notifications() {
     let ctx = zmq_ctx_new();
     let xpub = zmq_socket(ctx, ZMQ_XPUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
+    set_linger_zero(xpub);
+    set_linger_zero(sub);
 
     let port = helpers::free_port();
     let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
@@ -121,10 +137,14 @@ fn xpub_receives_sub_notifications() {
     // Publish a non-matching message.
     zmq_send(xpub, b"sports score".as_ptr().cast(), 12, 0);
 
-    // Should not reach SUB (500ms timeout).
-    set_timeo(sub, 500);
-    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(rc < 0, "sub should not receive non-matching msg");
+    // Should not reach SUB. Use nonblocking polls to avoid depending on
+    // platform timeout behavior in this filtering test.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
+        assert!(rc < 0, "sub should not receive non-matching msg");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     zmq_close(sub);
     zmq_close(xpub);
@@ -139,6 +159,10 @@ fn xpub_xsub_proxy_pattern() {
     let xsub = zmq_socket(ctx, ZMQ_XSUB);
     let xpub = zmq_socket(ctx, ZMQ_XPUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
+    set_linger_zero(pub_);
+    set_linger_zero(xsub);
+    set_linger_zero(xpub);
+    set_linger_zero(sub);
 
     let port_be = helpers::free_port();
     let port_fe = helpers::free_port();

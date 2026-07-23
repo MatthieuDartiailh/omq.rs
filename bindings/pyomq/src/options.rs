@@ -115,7 +115,7 @@ impl Default for Overlay {
 }
 
 impl Overlay {
-    /// Materialise an `backend::Options` from the overlay. Used
+    /// Materialize an `backend::Options` from the overlay. Used
     /// when the underlying Socket is first built.
     pub fn to_options(&self) -> PyResult<backend::Options> {
         #[allow(unused_mut)]
@@ -517,8 +517,8 @@ pub fn getsockopt<'py>(
     drop(sock.overlay.lock().unwrap()); // ensure poison-detection on every call path
     match option {
         constants::TYPE => {
-            let st = sock.socket_type;
-            let v: i32 = match st {
+            let socket_type = sock.socket_type;
+            let option_value: i32 = match socket_type {
                 backend::SocketType::Pair => constants::PAIR,
                 backend::SocketType::Pub => constants::PUB,
                 backend::SocketType::Sub => constants::SUB,
@@ -541,7 +541,7 @@ pub fn getsockopt<'py>(
                 backend::SocketType::Channel => constants::CHANNEL,
                 _ => -1,
             };
-            Ok(int_to_bound(py, v as i64))
+            Ok(int_to_bound(py, option_value as i64))
         }
         constants::RCVMORE => {
             let more = !sock.rxbuf.lock().unwrap().is_empty();
@@ -752,18 +752,19 @@ pub fn getsockopt<'py>(
         )),
         constants::FD => {
             sock.materialize()?;
-            let mat = sock.materialized.read().unwrap();
-            let m = mat.as_ref().unwrap();
-            m.recv_notify.arm_persistent();
-            Ok(int_to_bound(py, m.recv_notify.fd() as i64))
+            let materialized_guard = sock.materialized.read().unwrap();
+            let materialized = materialized_guard.as_ref().unwrap();
+            materialized.recv_ready.arm_persistent();
+            Ok(int_to_bound(py, materialized.recv_ready.fd() as i64))
         }
         constants::EVENTS => {
             let has_data = if !sock.rxbuf.lock().unwrap().is_empty() {
                 true
             } else {
-                let mat = sock.materialized.read().unwrap();
-                mat.as_ref()
-                    .is_some_and(|m| !m.recv_cons.lock().unwrap().is_empty())
+                let materialized_guard = sock.materialized.read().unwrap();
+                materialized_guard
+                    .as_ref()
+                    .is_some_and(|materialized| !materialized.recv_cons.lock().unwrap().is_empty())
             };
             let flags: i64 = if has_data { 1 } else { 0 };
             Ok(int_to_bound(py, flags))

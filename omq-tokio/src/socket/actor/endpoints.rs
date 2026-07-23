@@ -315,7 +315,7 @@ impl SocketDriver {
         let mut listener = bind_any(
             &endpoint,
             &snapshot,
-            &self.spsc.recv_notify,
+            &self.spsc.recv_signal,
             &self.spsc.blocking_recv_waker,
             self.options.max_message_size,
             #[cfg(feature = "ws")]
@@ -400,7 +400,7 @@ impl SocketDriver {
         let monitor_ep = endpoint.clone();
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
-        let recv_notify = self.spsc.recv_notify.clone();
+        let recv_signal = self.spsc.recv_signal.clone();
         let blocking_recv_waker = self.spsc.blocking_recv_waker.clone();
         let max_message_size = self.options.max_message_size;
         #[cfg(feature = "ws")]
@@ -414,7 +414,7 @@ impl SocketDriver {
                     connect_any(
                         &ep_for_dial,
                         &snapshot,
-                        &recv_notify,
+                        &recv_signal,
                         &blocking_recv_waker,
                         max_message_size,
                         #[cfg(feature = "ws")]

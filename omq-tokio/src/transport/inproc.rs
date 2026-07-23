@@ -7,7 +7,7 @@
 //! `mpsc` channels rather than serialising bytes through a duplex
 //! stream and re-parsing on the other side. The peer's socket
 //! type and identity are exchanged during connect, not over the
-//! wire, so the synthesised handshake completes immediately.
+//! wire, so the synthesized handshake completes immediately.
 //!
 //! Buffer capacity (whole messages, not bytes) defaults to
 //! `Options::send_hwm` at the `SocketDriver` layer where each
@@ -70,7 +70,7 @@ impl BlockingSpace {
 #[derive(Debug)]
 pub struct InprocTx {
     pub producer: yring::ProducerOwner<RecvItem>,
-    pub(crate) recv_notify: Arc<DataSignal>,
+    pub(crate) recv_signal: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
     pub space_notify: Arc<StateSignal>,
@@ -90,7 +90,7 @@ impl InprocTx {
 pub struct InprocRx {
     pub consumer: Mutex<yring::Consumer<RecvItem>>,
     pub batch_remaining: std::sync::atomic::AtomicUsize,
-    pub(crate) recv_notify: Arc<DataSignal>,
+    pub(crate) recv_signal: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub space_notify: Arc<StateSignal>,
     pub(crate) blocking_space: Arc<BlockingSpace>,
@@ -151,7 +151,7 @@ struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
     listener_to_connector_tx: mpsc::Sender<InboundFrame>,
-    connector_recv_notify: Arc<DataSignal>,
+    connector_recv_signal: Arc<DataSignal>,
     connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     connector_max_message_size: Option<usize>,
     accept_ack: oneshot::Sender<InprocAck>,
@@ -174,7 +174,7 @@ static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequ
 pub(crate) fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<DataSignal>,
+    recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocListener> {
@@ -196,7 +196,7 @@ pub(crate) fn bind(
             name: name.to_string(),
         },
         snapshot,
-        recv_notify,
+        recv_signal,
         blocking_recv_waker,
         max_message_size,
         incoming: rx,
@@ -206,7 +206,7 @@ pub(crate) fn bind(
 pub(crate) async fn connect_with_max_message_size(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<DataSignal>,
+    recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
@@ -225,7 +225,7 @@ pub(crate) async fn connect_with_max_message_size(
         connector: snapshot,
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
-        connector_recv_notify: recv_notify,
+        connector_recv_signal: recv_signal,
         connector_blocking_recv_waker: blocking_recv_waker,
         connector_max_message_size: max_message_size,
         accept_ack: ack_tx,
@@ -254,7 +254,7 @@ pub struct InprocListener {
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<DataSignal>,
+    recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
@@ -280,7 +280,7 @@ impl InprocListener {
             connector,
             connector_to_listener_rx,
             listener_to_connector_tx,
-            connector_recv_notify,
+            connector_recv_signal,
             connector_blocking_recv_waker,
             connector_max_message_size,
             accept_ack,
@@ -298,10 +298,10 @@ impl InprocListener {
         {
             let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
             let listener_is_recv = is_recv_side(self.snapshot.socket_type);
-            let notify = if listener_is_recv {
-                self.recv_notify.clone()
+            let ring_recv_signal = if listener_is_recv {
+                self.recv_signal.clone()
             } else {
-                connector_recv_notify
+                connector_recv_signal
             };
             let mms = if listener_is_recv {
                 self.max_message_size
@@ -312,7 +312,7 @@ impl InprocListener {
             let blocking_space = Arc::new(BlockingSpace::new());
             let tx = Arc::new(InprocTx {
                 producer: yring::ProducerOwner::new(p),
-                recv_notify: notify,
+                recv_signal: ring_recv_signal,
                 recv_ready: ready.clone(),
                 max_message_size: mms,
                 space_notify: Arc::new(StateSignal::new()),
@@ -326,7 +326,7 @@ impl InprocListener {
             let rx = Arc::new(InprocRx {
                 consumer: Mutex::new(c),
                 batch_remaining: std::sync::atomic::AtomicUsize::new(0),
-                recv_notify: tx.recv_notify.clone(),
+                recv_signal: tx.recv_signal.clone(),
                 recv_ready: ready,
                 space_notify: tx.space_notify.clone(),
                 blocking_space,

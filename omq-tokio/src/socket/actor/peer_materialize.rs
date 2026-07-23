@@ -481,13 +481,13 @@ fn attach_yring_recv_bypass(
         .unwrap_or_else(|| {
             let cap = socket.options.recv_hwm.max(16) as usize;
             let (prod, cons) = yring::spsc(cap);
-            let recv_notify = socket.spsc.recv_notify.clone();
+            let recv_signal = socket.spsc.recv_signal.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();
             let space = Arc::new(StateSignal::new());
             let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
                 producer: prod,
                 signal: Box::new(move || {
-                    recv_notify.mark();
+                    recv_signal.mark();
                     blocking_waker.wake();
                 }),
                 space: space.clone(),

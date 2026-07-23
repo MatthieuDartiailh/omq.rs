@@ -82,9 +82,9 @@ impl AsyncSocket {
             return Ok(());
         };
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().unwrap();
-        let mut prod = mat.send_prod.lock().unwrap();
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard.as_ref().unwrap();
+        let mut prod = materialized.send_prod.lock().unwrap();
         match prod.push_and_flush(msg) {
             Ok(_) => Ok(()),
             Err(_) => Err(timeout_err()),
@@ -96,9 +96,9 @@ impl AsyncSocket {
         let _ = flags;
         let msg = conversions::message_from_pylist(parts)?;
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().unwrap();
-        let mut prod = mat.send_prod.lock().unwrap();
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard.as_ref().unwrap();
+        let mut prod = materialized.send_prod.lock().unwrap();
         match prod.push_and_flush(msg) {
             Ok(_) => Ok(()),
             Err(_) => Err(timeout_err()),
@@ -113,11 +113,13 @@ impl AsyncSocket {
             return Ok(PyBytes::new(py, &head).into_any());
         }
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = mat.recv_cons.lock().unwrap();
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
-            mat.recv_space.notify_changed();
+            materialized.recv_space.notify_changed();
             let mut parts: Vec<Bytes> = msg.iter().collect();
             let head = if parts.is_empty() {
                 Bytes::new()
@@ -142,11 +144,13 @@ impl AsyncSocket {
             );
         }
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = mat.recv_cons.lock().unwrap();
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
-            mat.recv_space.notify_changed();
+            materialized.recv_space.notify_changed();
             Ok(conversions::parts_to_pylist(py, msg)?.into_any())
         } else {
             Ok(py.None().bind(py).clone())
@@ -156,15 +160,15 @@ impl AsyncSocket {
     #[pyo3(name = "_recv_fd")]
     fn recv_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
             .as_ref()
             .ok_or_else(|| crate::error::map_err(PError::Closed))?;
-        let recv_notify = mat.recv_notify.clone();
-        let owned_fd = recv_notify
+        let recv_ready = materialized.recv_ready.clone();
+        let owned_fd = recv_ready
             .dup_fd()
             .map_err(|e| crate::error::map_err(PError::Io(e)))?;
-        recv_notify.park_begin();
+        recv_ready.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
     }
@@ -172,15 +176,15 @@ impl AsyncSocket {
     #[pyo3(name = "_send_fd")]
     fn send_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
             .as_ref()
             .ok_or_else(|| crate::error::map_err(PError::Closed))?;
-        let send_notify = mat.send_notify.clone();
-        let owned_fd = send_notify
+        let send_ready = materialized.send_ready.clone();
+        let owned_fd = send_ready
             .dup_fd()
             .map_err(|e| crate::error::map_err(PError::Io(e)))?;
-        send_notify.park_begin();
+        send_ready.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
     }
