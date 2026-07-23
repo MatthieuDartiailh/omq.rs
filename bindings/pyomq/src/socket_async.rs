@@ -157,6 +157,7 @@ impl AsyncSocket {
         }
     }
 
+    #[cfg(unix)]
     #[pyo3(name = "_recv_fd")]
     fn recv_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
@@ -173,6 +174,15 @@ impl AsyncSocket {
         Ok(owned_fd.into_raw_fd())
     }
 
+    #[cfg(not(unix))]
+    #[pyo3(name = "_recv_fd")]
+    fn recv_fd(&self) -> PyResult<i32> {
+        Err(crate::error::map_err(omq_proto::error::Error::Protocol(
+            "_recv_fd() is only available on Unix platforms".to_string(),
+        )))
+    }
+
+    #[cfg(unix)]
     #[pyo3(name = "_send_fd")]
     fn send_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
@@ -187,6 +197,14 @@ impl AsyncSocket {
         send_ready.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
+    }
+
+    #[cfg(not(unix))]
+    #[pyo3(name = "_send_fd")]
+    fn send_fd(&self) -> PyResult<i32> {
+        Err(crate::error::map_err(omq_proto::error::Error::Protocol(
+            "_send_fd() is only available on Unix platforms".to_string(),
+        )))
     }
 
     // ── Subscriptions / groups (sync) ───────────────────────────────
