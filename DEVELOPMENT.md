@@ -72,10 +72,14 @@ OMQ_SKIP_PERF=1 ./scripts/test-all.sh
 OMQ_LOOM=1 ./scripts/test-all.sh
 ```
 
-The full sweep runs `omq_perf_verify` locally. With `.perf_hw` present,
-it uses machine-specific hardware thresholds. Without `.perf_hw`, it
-runs a smaller smoke gate for obvious TCP/inproc regressions. The perf
-gate skips when `CI` or `GITHUB_ACTIONS` is set.
+The full sweep runs `omq_perf_verify` locally. `.perf_hw` supplies hardware
+thresholds; if absent, a smaller smoke gate runs. CI skips the gate.
+
+Use `--list`, `--case NAME`, `--repeat N`, or `--measure-only` for focused checks.
+`OMQ_PERF_WARMUP_MS` and `OMQ_PERF_MEASURE_MS` set durations;
+`OMQ_PERF_CPUS` sets an ordered Linux CPU list. The verifier excludes warmup,
+times bounded batches, and reports rates using actual elapsed time.
+See [performance verification](doc/perf-verification.md) for threshold settings.
 
 GitHub CI runs `cargo fmt` and clippy on Linux, macOS Intel, macOS
 ARM64, and Windows. It runs workspace tests on Linux x86_64 with MSRV
@@ -202,6 +206,15 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 
 Unless stated otherwise, user ensures system is NOT noisy during benchmarks. So
 when a measured cell looks bad, don't hand-wave it as noise.
+
+- Throughput: no per-message clocks, logging, or shared measurement counters.
+  Use bounded message/byte batches; check deadlines while blocked.
+- Exclude warmup and boundary-crossing batches; use actual elapsed time.
+  Test clock-read bounds and window boundaries. Per-operation timing is for latency.
+- Profile instrumentation and library code. Compare revisions with identical
+  harness, flags, workload, warmup, duration, and CPU placement. Measure harness
+  changes against the same library.
+- Use `--measure-only` for diagnosis; do not lower thresholds to pass a regression.
 
 ### Cross-implementation Comparison Benchmarks
 

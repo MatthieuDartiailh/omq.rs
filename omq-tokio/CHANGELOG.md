@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Correct the local performance gate's warmup accounting and measurement
+  windows; bound receive drains and send retries, and stop on the first
+  failed gate. Add explicit Linux CPU placement and repeatable case selection
+  with sample ranges and median results.
+
 ## [0.22.1] - 2026-09-05
 
 ### Changed
