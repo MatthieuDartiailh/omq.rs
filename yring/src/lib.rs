@@ -6,10 +6,11 @@
 //! - `cursor`: writer position (plain usize, producer-only, no atomic)
 //! - `tail`: last flushed position (`AtomicUsize`, producer writes, consumer reads)
 //!
-//! `push` writes to the ring with zero atomics. `flush` makes all
-//! pending writes visible with one Release store. `pop` reads with
-//! zero atomics. `prefetch` loads all flushed items with one Acquire
-//! load. Result: 1 atomic per batch on each side.
+//! `push` writes without atomics while cached space remains. `flush`
+//! publishes writes with one Release store. `pop` reads without atomics;
+//! `prefetch` acquires a batch, and `release` publishes consumed slots.
+//! When wakeup hints are enabled, empty/full checks register waiters so
+//! the optional wakeup hints cannot miss a concurrent state transition.
 
 #[cfg(feature = "async")]
 mod r#async;
@@ -35,6 +36,54 @@ type Cursor = usize;
 #[repr(align(128))]
 pub(crate) struct Padded<T>(pub(crate) T);
 
+// Enabled by the notifying endpoint on first use of a wakeup-hint helper.
+// The peer acknowledges activation before hints may suppress notifications.
+struct Waiter {
+    enabled: AtomicBool,
+    armed: AtomicBool,
+    waiting: AtomicBool,
+}
+
+impl Waiter {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
+            waiting: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    fn enable(&self) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            self.enabled.store(true, Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn register(&self) -> bool {
+        if !self.enabled.load(Ordering::Acquire) {
+            return false;
+        }
+        self.waiting.swap(true, Ordering::AcqRel);
+        // A notifier may suppress wakes only after acquiring this acknowledgment.
+        // Registration precedes it; the caller rechecks the queue afterward.
+        self.armed.store(true, Ordering::Release);
+        true
+    }
+
+    #[inline]
+    fn take(&self, observed: bool) -> bool {
+        if observed || !self.armed.load(Ordering::Acquire) {
+            // Until the peer acknowledges activation, every publication wakes.
+            self.waiting.store(false, Ordering::Release);
+            true
+        } else {
+            self.waiting.swap(false, Ordering::AcqRel)
+        }
+    }
+}
+
 pub(crate) struct Ring<T> {
     pub(crate) buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
     pub(crate) mask: usize,
@@ -42,6 +91,10 @@ pub(crate) struct Ring<T> {
     pub(crate) head: Padded<AtomicCursor>,
     /// Last flushed position. Written by producer, read by consumer.
     pub(crate) tail: Padded<AtomicCursor>,
+    /// Empty/full observers register before rechecking the opposite cursor.
+    /// The notifying side exchanges this flag after publishing its cursor.
+    consumer_waiting: Padded<Waiter>,
+    producer_waiting: Padded<Waiter>,
     /// Set by `Producer::drop`. Lets the consumer detect that no more
     /// data will ever arrive.
     pub(crate) producer_dropped: AtomicBool,
@@ -76,6 +129,8 @@ impl<T> Ring<T> {
             mask: cap - 1,
             head: Padded(AtomicCursor::new(0)),
             tail: Padded(AtomicCursor::new(0)),
+            consumer_waiting: Padded(Waiter::new()),
+            producer_waiting: Padded(Waiter::new()),
             producer_dropped: AtomicBool::new(false),
             consumer_dropped: AtomicBool::new(false),
         }
@@ -124,6 +179,7 @@ impl<T> Ring<T> {
 
     #[inline]
     pub(crate) fn flush_to(&self, cursor: Cursor, cached_head: &mut Cursor) -> FlushResult {
+        self.consumer_waiting.0.enable();
         let prev_tail = self.tail.0.load(Ordering::Relaxed);
         if cursor == prev_tail {
             return FlushResult::NothingToFlush;
@@ -132,9 +188,12 @@ impl<T> Ring<T> {
         *cached_head = self.head.0.load(Ordering::Acquire);
         let was_empty = prev_tail == *cached_head;
         self.tail.0.store(cursor, Ordering::Release);
+        // Pair with the consumer's register-then-recheck exchange. Either
+        // this sees its registration, or its recheck sees our publication.
+        let wake = self.consumer_waiting.0.take(was_empty);
         FlushResult::Flushed {
             count: Self::count(count),
-            was_empty,
+            was_empty: wake,
         }
     }
 
@@ -239,14 +298,15 @@ pub enum FlushResult {
     Flushed {
         /// Number of items made visible.
         count: usize,
-        /// Whether the consumer had no visible items before this flush.
+        /// Whether the consumer needs a wake: the queue was observed empty
+        /// or a waiter may exist. Conservative during protocol activation too.
         was_empty: bool,
     },
     /// Nothing to flush (cursor == tail already).
     NothingToFlush,
 }
 
-/// Sending half. `Send` but not `Sync`.
+/// Sending half. Mutation requires exclusive access.
 pub struct Producer<T> {
     ring: Arc<Ring<T>>,
     /// Private write position. No atomic; only the producer touches it.
@@ -269,8 +329,8 @@ impl<T> Drop for Producer<T> {
     }
 }
 
-// SAFETY: Producer<T> is Send because it is single-owner (not Sync) and the
-// underlying Ring is Send+Sync. Moving the producer to another thread is safe.
+// SAFETY: Producer mutations require &mut self and the underlying Ring is
+// Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}
 
 /// Single-thread owner handle for a producer shared through an `Arc`.
@@ -361,7 +421,21 @@ fn current_thread_token() -> usize {
         if current != 0 {
             return current;
         }
-        let current = NEXT_THREAD_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut next = NEXT_THREAD_TOKEN.load(std::sync::atomic::Ordering::Relaxed);
+        let current = loop {
+            let following = next
+                .checked_add(1)
+                .expect("ProducerOwner thread tokens exhausted");
+            match NEXT_THREAD_TOKEN.compare_exchange_weak(
+                next,
+                following,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(current) => break current,
+                Err(actual) => next = actual,
+            }
+        };
         token.set(current);
         current
     })
@@ -373,7 +447,7 @@ impl<T> std::fmt::Debug for ProducerOwner<T> {
     }
 }
 
-/// Receiving half. `Send` but not `Sync`.
+/// Receiving half. Mutation requires exclusive access.
 pub struct Consumer<T> {
     ring: Arc<Ring<T>>,
     /// Private read position. Only the consumer touches it.
@@ -390,8 +464,8 @@ impl<T> Consumer<T> {
     }
 }
 
-// SAFETY: Consumer<T> is Send because it is single-owner (not Sync) and the
-// underlying Ring is Send+Sync. Moving the consumer to another thread is safe.
+// SAFETY: Consumer mutations require &mut self and the underlying Ring is
+// Send+Sync. Moving the consumer to another thread is safe.
 unsafe impl<T: Send> Send for Consumer<T> {}
 
 /// Create a bounded SPSC ring with the given capacity (rounded up to
@@ -433,10 +507,23 @@ pub fn loom_spsc_with_cursors<T>(capacity: usize, cursor: usize) -> (Producer<T>
 }
 
 impl<T> Producer<T> {
-    /// Write a value to the ring. Zero atomics. Returns `Err(val)` if full.
+    /// Write a value without atomics while cached space remains.
+    /// Returns `Err(val)` if full. When space hints are enabled, registers a
+    /// waiter and retries before returning.
     /// The value is NOT visible to the consumer until [`flush`](Self::flush).
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
+        match self.ring.push(&mut self.cursor, &mut self.cached_head, val) {
+            Ok(()) => Ok(()),
+            Err(val) => self.push_after_full(val),
+        }
+    }
+
+    #[cold]
+    fn push_after_full(&mut self, val: T) -> Result<(), T> {
+        if !self.ring.producer_waiting.0.register() {
+            return Err(val);
+        }
         self.ring.push(&mut self.cursor, &mut self.cached_head, val)
     }
 
@@ -448,9 +535,13 @@ impl<T> Producer<T> {
         self.ring.tail.0.store(self.cursor, Ordering::Release);
     }
 
-    /// Flush and report whether the ring was empty (consumer fully caught
-    /// up). Loads `head` (one Acquire) in addition to the Release store.
-    /// Only needed when the caller uses `was_empty` for wakeup decisions.
+    /// Flush and report whether the consumer needs a wake.
+    ///
+    /// In addition to the empty snapshot, this acknowledges registrations
+    /// made by [`Consumer::prefetch`] or [`Consumer::is_empty`]. The consumer
+    /// must use one of those checks before waiting, and the caller must
+    /// signal whenever `was_empty` is true. Extra wakes are possible.
+    /// Use [`flush`](Self::flush) when signaling through a separate protocol.
     #[inline]
     pub fn flush_and_check(&mut self) -> FlushResult {
         self.ring.flush_to(self.cursor, &mut self.cached_head)
@@ -467,6 +558,12 @@ impl<T> Producer<T> {
     #[inline]
     /// Return whether the ring cannot accept another item.
     pub fn is_full(&mut self) -> bool {
+        if !self.ring.is_full(self.cursor, &mut self.cached_head) {
+            return false;
+        }
+        if !self.ring.producer_waiting.0.register() {
+            return true;
+        }
         self.ring.is_full(self.cursor, &mut self.cached_head)
     }
 
@@ -531,10 +628,23 @@ impl<T> Consumer<T> {
         self.ring.release(self.head);
     }
 
-    /// Load all items flushed since the last prefetch. One Acquire load.
-    /// Returns the count of newly available items.
+    /// Load all items flushed since the last prefetch.
+    /// Returns the count of newly available items. When data hints are enabled,
+    /// an empty window registers a waiter and rechecks before returning.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
+        let count = self.ring.prefetch(&mut self.cached_tail);
+        if self.head != self.cached_tail {
+            return count;
+        }
+        self.prefetch_after_empty()
+    }
+
+    #[cold]
+    fn prefetch_after_empty(&mut self) -> usize {
+        if !self.ring.consumer_waiting.0.register() {
+            return 0;
+        }
         self.ring.prefetch(&mut self.cached_tail)
     }
 
@@ -552,24 +662,36 @@ impl<T> Consumer<T> {
         val
     }
 
-    /// Prefetch + pop + release, returning whether the ring was full before
-    /// the pop released one slot.
+    /// Prefetch + pop + release, returning whether the producer needs a wake.
     ///
-    /// This always prefetches before checking fullness. A producer may have
-    /// flushed more items behind the consumer's cached window, and a caller
-    /// using `was_full` for space wakeups must observe that state.
+    /// The hint includes both observed fullness and a producer registration
+    /// from [`Producer::push`] or [`Producer::is_full`]. It may conservatively
+    /// report true after a producer has already resumed. Signal whenever it
+    /// is true; register external waiters before rechecking the full queue.
     #[inline]
     pub fn prefetch_and_pop_with_full(&mut self) -> Option<(T, bool)> {
-        self.prefetch();
+        self.ring.producer_waiting.0.enable();
+        if self.head == self.cached_tail {
+            self.prefetch();
+        }
+        // A refilled ring can exceed this cached window. The producer's
+        // full registration covers that case without a tail load per pop.
         let was_full = self.cached_tail.wrapping_sub(self.head) >= self.capacity();
         let val = self.pop()?;
         self.release();
-        Some((val, was_full))
+        let wake = self.ring.producer_waiting.0.take(was_full);
+        Some((val, wake))
     }
 
     #[inline]
     /// Return whether the consumer has no visible items.
     pub fn is_empty(&self) -> bool {
+        if !self.ring.consumer_is_empty(self.head, self.cached_tail) {
+            return false;
+        }
+        if !self.ring.consumer_waiting.0.register() {
+            return true;
+        }
         self.ring.consumer_is_empty(self.head, self.cached_tail)
     }
 
@@ -661,8 +783,10 @@ mod tests {
     #[test]
     fn prefetch_and_pop_with_full_reports_full_transition() {
         let (mut p, mut c) = spsc::<u32>(2);
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
         p.push(10).unwrap();
         p.push(20).unwrap();
+        assert!(p.is_full());
         p.flush();
 
         assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
@@ -671,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_and_pop_with_full_prefetches_stale_tail_before_full_check() {
+    fn prefetch_and_pop_with_full_observes_waiter_behind_cached_tail() {
         let (mut p, mut c) = spsc::<u32>(2);
         p.push(10).unwrap();
         p.push(20).unwrap();
@@ -688,13 +812,30 @@ mod tests {
         assert_eq!(c.prefetch_and_pop_with_full(), Some((30, false)));
     }
 
+    #[test]
+    fn prefetch_and_pop_with_full_wakes_for_unflushed_full_ring() {
+        let (mut p, mut c) = spsc::<u32>(2);
+        p.push_and_flush(10).unwrap();
+        p.push(20).unwrap();
+        assert_eq!(p.push(30), Err(30));
+
+        // Fullness includes the producer's unpublished slot. The cached
+        // tail alone cannot tell that the producer needs a space wake.
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
+        p.push_and_flush(30).unwrap();
+        assert_eq!(c.prefetch_and_pop(), Some(20));
+        assert_eq!(c.prefetch_and_pop(), Some(30));
+    }
+
     #[cfg(all(loom, target_pointer_width = "64"))]
     #[test]
     fn prefetch_and_pop_with_full_handles_cursor_wrap() {
         let base = usize::MAX - 1;
         let (mut p, mut c) = loom_spsc_with_cursors::<u32>(2, base);
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
         p.push(10).unwrap();
         p.push(20).unwrap();
+        assert!(p.is_full());
         p.flush();
 
         assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
@@ -741,6 +882,64 @@ mod tests {
         let first = first.join();
         let second = second.join();
         assert_ne!(first.is_ok(), second.is_ok());
+    }
+
+    #[cfg(not(any(loom, miri)))]
+    #[test]
+    fn producer_owner_rejects_other_threads_after_token_wrap() {
+        use std::sync::{Arc, Barrier, mpsc};
+
+        const CHILD_ENV: &str = "OMQ_YRING_TOKEN_WRAP_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Changing the global token counter must not affect other tests.
+            // Miri cannot launch this isolated subprocess.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::producer_owner_rejects_other_threads_after_token_wrap",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated token wrap test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let (producer, _consumer) = spsc::<u32>(4);
+        let owner = Arc::new(ProducerOwner::new(producer));
+        let barrier = Arc::new(Barrier::new(2));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let first_owner = owner.clone();
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            first_owner.push(1).unwrap();
+            ready_tx.send(()).unwrap();
+            first_barrier.wait();
+        });
+        ready_rx.recv().unwrap();
+
+        // Skip to wraparound while the original owner thread remains alive.
+        // New threads get MAX, 0, then the original owner's token (1).
+        NEXT_THREAD_TOKEN.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut accepted = 0;
+        for _ in 0..3 {
+            let other_owner = owner.clone();
+            if std::thread::spawn(move || other_owner.push(2))
+                .join()
+                .is_ok()
+            {
+                accepted += 1;
+            }
+        }
+        barrier.wait();
+        first.join().unwrap();
+        assert_eq!(accepted, 0, "another live thread passed the owner check");
     }
 
     #[test]

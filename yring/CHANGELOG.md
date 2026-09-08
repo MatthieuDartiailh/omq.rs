@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent lost data/space wakeups with registered waiter handshakes around
+  empty/full checks. Wakeup hints include registered waiters.
+- Drain the producer's final flush before returning stream EOF.
+- Release each stream item before returning it, waking blocked producers
+  without requiring another stream poll. Repeated releases are no-ops.
+- Reject producer thread-token exhaustion instead of reusing owner tokens.
+
 ## [0.3.15] - 2026-09-05
 
 ### Changed

@@ -60,9 +60,11 @@ fn prefetch_and_pop_with_full_reports_full_transition() {
     loom::model(|| {
         let (mut p, mut c) = yring::spsc::<u32>(2);
 
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
         let h = thread::spawn(move || {
             p.push(10).unwrap();
             p.push(20).unwrap();
+            assert!(p.is_full());
             p.flush();
         });
 
@@ -82,8 +84,7 @@ fn prefetch_and_pop_with_full_reports_full_transition() {
 
 #[test]
 fn prefetch_and_pop_with_full_observes_refilled_full_ring() {
-    use loom::sync::Arc;
-    use loom::sync::atomic::{AtomicBool, Ordering};
+    use loom::sync::mpsc;
 
     loom::model(|| {
         let (mut p, mut c) = yring::spsc::<u32>(2);
@@ -91,26 +92,19 @@ fn prefetch_and_pop_with_full_observes_refilled_full_ring() {
         p.push(20).unwrap();
         p.flush();
 
-        let released_one = Arc::new(AtomicBool::new(false));
-        let attempted_second_push = Arc::new(AtomicBool::new(false));
-        let released_one_for_producer = released_one.clone();
-        let attempted_second_push_for_producer = attempted_second_push.clone();
+        let (released_tx, released_rx) = mpsc::channel();
+        let (attempted_tx, attempted_rx) = mpsc::channel();
 
         let h = thread::spawn(move || {
-            while !released_one_for_producer.load(Ordering::Acquire) {
-                thread::yield_now();
-            }
-
-            while p.push(30).is_err() {
-                thread::yield_now();
-            }
+            released_rx.recv().unwrap();
+            p.push(30).unwrap();
             p.flush();
 
             let mut value = match p.push(40) {
                 Ok(()) => panic!("released second slot before second pop"),
                 Err(value) => value,
             };
-            attempted_second_push_for_producer.store(true, Ordering::Release);
+            attempted_tx.send(()).unwrap();
 
             while let Err(returned) = p.push(value) {
                 value = returned;
@@ -121,11 +115,8 @@ fn prefetch_and_pop_with_full_observes_refilled_full_ring() {
 
         assert_eq!(c.prefetch(), 2);
         assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
-        released_one.store(true, Ordering::Release);
-
-        while !attempted_second_push.load(Ordering::Acquire) {
-            thread::yield_now();
-        }
+        released_tx.send(()).unwrap();
+        attempted_rx.recv().unwrap();
 
         assert_eq!(c.prefetch_and_pop_with_full(), Some((20, true)));
 
@@ -149,9 +140,11 @@ fn prefetch_and_pop_with_full_handles_cursor_wrap() {
         let base = usize::MAX - 1;
         let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
 
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
         let h = thread::spawn(move || {
             p.push(10).unwrap();
             p.push(20).unwrap();
+            assert!(p.is_full());
             p.flush();
         });
 
@@ -366,6 +359,116 @@ fn is_disconnected_after_producer_drop() {
     });
 }
 
+#[cfg(feature = "async")]
+#[test]
+fn stream_drains_final_item_before_eof() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    use futures_core::Stream;
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::async_spsc::<u32>(1);
+        let h = thread::spawn(move || {
+            p.push(42).unwrap();
+            drop(p);
+        });
+
+        let mut cx = Context::from_waker(Waker::noop());
+        // Race the empty check and EOF check against the producer's final
+        // flush. Joining before this poll would hide the race.
+        let result = Pin::new(&mut c).poll_next(&mut cx);
+        h.join().unwrap();
+        match result {
+            Poll::Ready(None) => panic!("premature EOF with {} queued items", c.len()),
+            Poll::Ready(Some(value)) => assert_eq!(value, 42),
+            Poll::Pending => {
+                assert_eq!(Pin::new(&mut c).poll_next(&mut cx), Poll::Ready(Some(42)));
+            }
+        }
+    });
+}
+
+#[test]
+fn flush_and_check_reports_concurrent_empty_transition() {
+    for (check_empty, armed) in [(false, false), (true, false), (false, true), (true, true)] {
+        loom::model(move || {
+            let (mut p, mut c) = yring::spsc::<u32>(2);
+            if armed {
+                p.flush_and_check();
+                assert_eq!(c.prefetch(), 0);
+            }
+            p.push_and_flush(1).unwrap();
+            let h = thread::spawn(move || {
+                p.push(2).unwrap();
+                p.flush_and_check()
+            });
+
+            assert_eq!(c.prefetch_and_pop(), Some(1));
+            let empty = if check_empty {
+                c.is_empty()
+            } else {
+                c.prefetch_and_pop().is_none()
+            };
+            let result = h.join().unwrap();
+            if empty {
+                // A caller that parks after observing empty depends on this
+                // flag to receive a wake for the second item.
+                assert!(
+                    matches!(
+                        result,
+                        yring::FlushResult::Flushed {
+                            was_empty: true,
+                            ..
+                        }
+                    ),
+                    "consumer parks, but flush suppresses its wake: {result:?}"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn prefetch_and_pop_with_full_reports_concurrent_full_transition() {
+    for (check_full, armed) in [(false, false), (true, false), (false, true), (true, true)] {
+        loom::model(move || {
+            let (mut p, mut c) = yring::spsc::<u32>(2);
+            if armed {
+                assert_eq!(c.prefetch_and_pop_with_full(), None);
+                p.push(0).unwrap();
+                p.push_and_flush(0).unwrap();
+                assert!(p.is_full());
+                assert_eq!(c.prefetch_and_pop_with_full(), Some((0, true)));
+                assert_eq!(c.prefetch_and_pop_with_full(), Some((0, false)));
+            }
+            p.push_and_flush(1).unwrap();
+            let h = thread::spawn(move || {
+                p.push_and_flush(2).unwrap();
+                let blocked = if check_full {
+                    p.is_full()
+                } else {
+                    p.push(3).is_err()
+                };
+                (p, blocked)
+            });
+
+            let (first, first_wake) = c.prefetch_and_pop_with_full().unwrap();
+            assert_eq!(first, 1);
+            // Keep the producer alive: shutdown must not rescue a lost space wake.
+            let (_p, blocked) = h.join().unwrap();
+            let (second, second_wake) = c.prefetch_and_pop_with_full().unwrap();
+            assert_eq!(second, 2);
+            if blocked {
+                assert!(
+                    first_wake || second_wake,
+                    "producer saw full, but both pops suppress its space wake"
+                );
+            }
+        });
+    }
+}
+
 /// Verify `push_async` doesn't lose wakeups.
 ///
 /// The critical race: consumer releases between the producer's
@@ -425,6 +528,54 @@ fn push_async_no_lost_wakeup() {
 
         h.join().unwrap();
         assert!(pushed.load(Ordering::Relaxed));
+    });
+}
+
+#[test]
+fn push_async_pending_receives_space_wake() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountWakes(AtomicUsize);
+
+    impl Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::async_spsc::<u32>(1);
+        p.push_and_flush(10).unwrap();
+        let notifications = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let released = Arc::new(AtomicBool::new(false));
+        let released_for_producer = released.clone();
+        let h = thread::spawn(move || {
+            let mut cx = Context::from_waker(&waker);
+            let result = {
+                let mut future = p.push_async(20);
+                let result = Pin::new(&mut future).poll(&mut cx);
+                while !released_for_producer.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+                result
+            };
+            (p, result)
+        });
+
+        assert_eq!(c.prefetch_and_pop(), Some(10));
+        released.store(true, Ordering::Release);
+        let (_p, result) = h.join().unwrap();
+        // Never repoll an unwoken Pending future: that would hide a lost wake.
+        match result {
+            Poll::Pending => assert!(notifications.0.load(Ordering::Relaxed) > 0),
+            Poll::Ready(result) => assert_eq!(result, Ok(())),
+        }
     });
 }
 

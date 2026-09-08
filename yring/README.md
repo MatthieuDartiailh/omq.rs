@@ -10,21 +10,23 @@ atomics become the bottleneck.
 
 ## The solution
 
-Three pointers instead of two:
+Separate writing from publication:
 
 - `head`: consumer read position (AtomicUsize, consumer-owned)
 - `cursor`: producer write position (plain usize, producer-private, no atomic)
 - `tail`: last flushed position (AtomicUsize, producer writes / consumer reads)
 
-`push()` writes to the ring with zero atomics. `flush()` makes all
+`push()` writes without atomics while cached space remains. `flush()` makes all
 pending writes visible with a single Release store. `prefetch()` loads
 all available items with a single Acquire load. `pop()` reads with zero
 atomics. `release()` publishes consumed slots back to the producer with
 a single Release store. Result: atomic synchronization happens per
 batch, not per item.
 
-This is the core ypipe innovation from ZeroMQ, applied to a fixed-capacity
-ring buffer instead of a linked list.
+The speedup comes from caching positions and publishing batches. The
+three-pointer description counts the producer's local cursor alongside two
+shared atomic cursors. The consumer also keeps a local read position and
+a cached publication boundary.
 
 ## Usage
 
@@ -47,8 +49,8 @@ consumer.release(); // one Release store frees slots for producer
 
 ## Sharing the producer handle
 
-`Producer` is `Send` but not `Sync`. When a producer handle must be stored in
-an `Arc` or shared with another owner, wrap it in `ProducerOwner`:
+`Producer` needs `&mut self` for writes. To write through a handle stored in
+an `Arc`, wrap it in `ProducerOwner`:
 
 ```rust
 use std::sync::Arc;
@@ -74,6 +76,7 @@ handle itself to be shared. The first producer call binds it to the current
 thread. Later calls from another thread panic. Multiple owners are fine, but
 all producer calls must come from the same thread. For producer access from
 multiple threads, use a channel with a multi-producer API instead.
+Thread tokens never wrap: allocation panics if the token range is exhausted.
 
 The key advantage over chunk-based batching APIs (like `rtrb`'s
 `write_chunk_uninit`): you keep the simple per-item `push()`/`pop()`
@@ -89,6 +92,31 @@ spins internally.
 The `async` feature (opt-in) adds `AsyncProducer`/`AsyncConsumer` with
 waker integration: the producer wakes the consumer on flush, the
 consumer wakes the producer on release.
+
+`AsyncConsumer`'s `Stream` implementation releases each item before returning
+it. Use `prefetch()`/`pop()`/`release()` directly for batched release.
+`push_async()` buffers without flushing; flush pending items before awaiting
+space in a full ring.
+
+## Wakeup hints
+
+`flush_and_check()` and `prefetch_and_pop_with_full()` provide conservative
+wakeup hints. Their booleans include registered waiters, so they are not
+exact empty/full snapshots. Signal whenever the returned hint is true.
+Calling either helper enables registration on the opposite endpoint. Hints
+remain conservatively true until that endpoint acknowledges activation.
+Queues using only ordinary flush/release skip this registration protocol.
+
+Once enabled, an empty `Consumer::prefetch()` window or `Consumer::is_empty()` check
+registers a data waiter before rechecking publication. A full
+`Producer::push()` or `Producer::is_full()` check registers a space waiter
+before retrying. These checks pair with the hint-producing operations so a
+concurrent flush or release cannot strand a waiter. Register any external
+waker before the final queue check, or use a stateful notification primitive.
+Exhausting the cached `pop()` window alone does not register a waiter.
+
+Ordinary `flush()` and `release()` still use one Release store. Use these
+when a separate signaling protocol handles wakeups.
 
 ## Correctness checks
 
