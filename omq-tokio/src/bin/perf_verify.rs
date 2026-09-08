@@ -5,14 +5,55 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, LazyLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use omq_proto::flow::DrainBudget;
 use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
+
+#[path = "perf_verify/affinity.rs"]
+mod affinity;
+#[path = "perf_verify/measurement.rs"]
+mod measurement;
+
+use affinity::{Affinity, Side};
+use measurement::{Counter, DrainResult, MEASURED_TAG, Received, Window, drain_ready};
+
+struct Settings {
+    affinity: Affinity,
+    warmup: Duration,
+    measure: Duration,
+}
+
+static SETTINGS: LazyLock<Settings> = LazyLock::new(|| Settings {
+    affinity: Affinity::from_env(),
+    warmup: duration_env("OMQ_PERF_WARMUP_MS", WARMUP),
+    measure: duration_env("OMQ_PERF_MEASURE_MS", MEASURE),
+});
+
+fn duration_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name).map_or(default, |value| {
+        let millis = value
+            .parse()
+            .expect("benchmark duration must be milliseconds");
+        assert!(millis > 0, "benchmark duration must be positive");
+        Duration::from_millis(millis)
+    })
+}
+
+fn context(io_threads: usize, side: Side) -> Context {
+    let name = match side {
+        Side::Sender => "perf-tx",
+        Side::Receiver => "perf-rx",
+    };
+    let ctx = Context::with_config_and_name(ContextConfig { io_threads }, name);
+    SETTINGS.affinity.pin_context(name, io_threads, side);
+    ctx
+}
 
 const WARMUP: Duration = Duration::from_millis(100);
 const MEASURE: Duration = Duration::from_millis(750);
@@ -39,7 +80,11 @@ struct ThresholdConfig {
 }
 
 fn payload(size: usize) -> Message {
-    let bytes = vec![0x5a; size];
+    tagged_payload(size, MEASURED_TAG)
+}
+
+fn tagged_payload(size: usize, tag: u8) -> Message {
+    let bytes = vec![tag; size];
     if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
         Message::from_slice(&bytes)
     } else {
@@ -65,12 +110,17 @@ fn smoke_thresholds() -> HashMap<String, f64> {
 }
 
 fn read_thresholds() -> ThresholdConfig {
-    let Ok(contents) = std::fs::read_to_string(".perf_hw") else {
-        return ThresholdConfig {
-            mode: ThresholdMode::Smoke,
-            values: smoke_thresholds(),
-        };
+    let contents = match std::fs::read_to_string(".perf_hw") {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ThresholdConfig {
+                mode: ThresholdMode::Smoke,
+                values: smoke_thresholds(),
+            };
+        }
+        Err(error) => panic!("cannot read .perf_hw: {error}"),
     };
+    println!("threshold file: .perf_hw");
     let mut section = String::new();
     let mut thresholds = HashMap::new();
     for line in contents.lines() {
@@ -117,65 +167,177 @@ async fn reqrep_latency() -> f64 {
         }
     });
     let msg = payload(256);
-    for _ in 0..100 {
-        req.send(msg.clone()).await.expect("REQ warmup send");
-        req.recv().await.expect("REQ warmup recv");
+    let warmup_end = Instant::now() + SETTINGS.warmup;
+    while Instant::now() < warmup_end {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            req.send(msg.clone()).await.expect("REQ warmup send");
+            req.recv().await.expect("REQ warmup recv");
+        })
+        .await
+        .expect("REQ warmup timeout");
     }
     let mut samples = Vec::with_capacity(500);
     for _ in 0..500 {
         let start = Instant::now();
-        req.send(msg.clone()).await.expect("REQ send");
-        req.recv().await.expect("REQ recv");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            req.send(msg.clone()).await.expect("REQ send");
+            req.recv().await.expect("REQ recv");
+        })
+        .await
+        .expect("REQ measurement timeout");
         samples.push(start.elapsed().as_secs_f64() * 1_000_000.0);
     }
     echo.abort();
+    let _ = echo.await;
     samples.sort_by(f64::total_cmp);
     samples[samples.len() / 2]
 }
 
-async fn try_send_until(sock: &omq_tokio::Socket, mut msg: Message, deadline: Instant) -> bool {
+async fn send_batch_until(sock: &omq_tokio::Socket, message: &Message, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let mut budget = DrainBudget::WORKER;
+    let bytes = message.byte_len();
     loop {
-        match sock.try_send(msg) {
-            Ok(()) => return true,
-            Err(omq_tokio::TrySendError::Full(returned)) => {
-                msg = returned;
-                if Instant::now() >= deadline {
-                    return false;
+        let mut msg = message.clone();
+        loop {
+            match sock.try_send(msg) {
+                Ok(()) => break,
+                Err(omq_tokio::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    msg = returned;
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
+                Err(error) => panic!("perf send failed: {error}"),
             }
-            Err(error) => panic!("perf send failed: {error}"),
+        }
+        if !budget.account(bytes) {
+            return true;
         }
     }
 }
 
-async fn count_messages(sock: omq_tokio::Socket, deadline: Instant) -> u64 {
-    let mut count = 0_u64;
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if !matches!(
-            tokio::time::timeout(remaining, sock.recv()).await,
-            Ok(Ok(_))
-        ) {
-            break;
+fn send_blocking_batch_until(
+    sock: &omq_tokio::blocking::Socket,
+    message: &Message,
+    deadline: Instant,
+) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let mut budget = DrainBudget::WORKER;
+    let bytes = message.byte_len();
+    loop {
+        let mut msg = message.clone();
+        loop {
+            match sock.try_send(msg) {
+                Ok(()) => break,
+                Err(omq_tokio::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    msg = returned;
+                    thread::yield_now();
+                }
+                Err(error) => panic!("perf send failed: {error}"),
+            }
         }
-        count += 1;
-        while sock.try_recv().is_ok() {
-            count += 1;
+        if !budget.account(bytes) {
+            return true;
+        }
+    }
+}
+
+async fn count_messages(sock: omq_tokio::Socket, window: Window) -> Received {
+    let mut counter = Counter::new(window);
+    loop {
+        let mut budget = DrainBudget::WORKER;
+        match drain_ready(
+            || sock.try_recv(),
+            &mut counter,
+            window,
+            &mut budget,
+            Instant::now,
+        ) {
+            DrainResult::Deadline => break,
+            DrainResult::Budget => {}
+            DrainResult::Empty => {
+                match tokio::time::timeout_at(window.end.into(), sock.recv()).await {
+                    Ok(Ok(message)) => {
+                        counter.record(&message, Instant::now());
+                        let _ = budget.account(message.byte_len());
+                    }
+                    Ok(Err(error)) => panic!("perf recv failed: {error}"),
+                    Err(_) => break, // Normal end of this measurement window.
+                }
+            }
         }
         tokio::task::yield_now().await;
     }
-    count
+    counter.finish(Instant::now())
+}
+
+fn count_blocking(sock: &omq_tokio::blocking::Socket, window: Window) -> Received {
+    let mut counter = Counter::new(window);
+    loop {
+        let mut budget = DrainBudget::WORKER;
+        if drain_ready(
+            || sock.try_recv(),
+            &mut counter,
+            window,
+            &mut budget,
+            Instant::now,
+        ) == DrainResult::Deadline
+        {
+            break;
+        }
+        thread::yield_now();
+    }
+    counter.finish(Instant::now())
+}
+
+fn transfer_blocking(
+    sender: &omq_tokio::blocking::Socket,
+    receiver: omq_tokio::blocking::Socket,
+    size: usize,
+) -> f64 {
+    let (window_tx, window_rx) = mpsc::channel();
+    let ready = Arc::new(Barrier::new(2));
+    let receiver_ready = ready.clone();
+    let handle = thread::spawn(move || {
+        SETTINGS.affinity.pin(5);
+        receiver_ready.wait();
+        count_blocking(
+            &receiver,
+            window_rx.recv().expect("receive benchmark window"),
+        )
+    });
+    ready.wait();
+    let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
+    window_tx.send(window).expect("send benchmark window");
+    // Warm the actual data path while the receiver drains. Tags exclude any
+    // warmup backlog still in flight when measurement starts.
+    for (message, deadline) in [
+        (tagged_payload(size, 0), window.start),
+        (payload(size), window.end),
+    ] {
+        while send_blocking_batch_until(sender, &message, deadline) {}
+    }
+    handle.join().expect("receiver thread").rate()
 }
 
 async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
     tokio::task::spawn_blocking(move || {
+        SETTINGS.affinity.pin(0);
         let is_inproc = matches!(endpoint, Endpoint::Inproc { .. });
-        let pull_ctx = Context::with_config(ContextConfig { io_threads });
+        let pull_ctx = context(io_threads, Side::Receiver);
         let push_ctx = if is_inproc {
             pull_ctx.clone()
         } else {
-            Context::with_config(ContextConfig { io_threads })
+            context(io_threads, Side::Sender)
         };
         let pull = pull_ctx.blocking_socket(SocketType::Pull, Options::default());
         let push = push_ctx.blocking_socket(SocketType::Push, Options::default());
@@ -183,49 +345,10 @@ async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
         push.connect(endpoint).expect("PUSH connect");
         pull.wait_connected(1, Duration::from_secs(1))
             .expect("PULL connect timeout");
-
-        let done = Arc::new(AtomicBool::new(false));
-        let receiver_done = done.clone();
-        let receiver = thread::spawn(move || {
-            thread::sleep(WARMUP);
-            let mut count = 0_u64;
-            loop {
-                match pull.try_recv() {
-                    Ok(_) => {
-                        count += 1;
-                        while pull.try_recv().is_ok() {
-                            count += 1;
-                        }
-                    }
-                    Err(_) if receiver_done.load(Ordering::Acquire) => break,
-                    Err(_) => thread::yield_now(),
-                }
-            }
-            count
-        });
-
-        thread::sleep(WARMUP);
-        let msg = payload(size);
-        let deadline = Instant::now() + MEASURE;
-        while Instant::now() < deadline {
-            let mut pending = msg.clone();
-            loop {
-                match push.try_send(pending) {
-                    Ok(()) => break,
-                    Err(omq_tokio::TrySendError::Full(returned)) => {
-                        pending = returned;
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("PUSH send failed: {error}"),
-                }
-            }
-        }
-        push.send(msg).expect("PUSH wakeup send");
-        done.store(true, Ordering::Release);
-        let count = receiver.join().expect("PULL thread");
+        let rate = transfer_blocking(&push, pull, size);
         push_ctx.term();
         pull_ctx.term();
-        count as f64 / MEASURE.as_secs_f64()
+        rate
     })
     .await
     .expect("PUSH/PULL task")
@@ -238,8 +361,9 @@ async fn fanin(
     sender_type: SocketType,
 ) -> f64 {
     tokio::task::spawn_blocking(move || {
-        let receiver_ctx = Context::with_config(ContextConfig { io_threads });
-        let sender_ctx = Context::with_config(ContextConfig { io_threads });
+        SETTINGS.affinity.pin(0);
+        let receiver_ctx = context(io_threads, Side::Receiver);
+        let sender_ctx = context(io_threads, Side::Sender);
         let receiver = receiver_ctx.blocking_socket(receiver_type, Options::default());
         let sender = sender_ctx.blocking_socket(
             sender_type,
@@ -250,49 +374,10 @@ async fn fanin(
         receiver
             .wait_connected(1, Duration::from_secs(1))
             .expect("receiver connect timeout");
-
-        let done = Arc::new(AtomicBool::new(false));
-        let receiver_done = done.clone();
-        let receiver_thread = thread::spawn(move || {
-            thread::sleep(WARMUP);
-            let mut count = 0_u64;
-            loop {
-                match receiver.try_recv() {
-                    Ok(_) => {
-                        count += 1;
-                        while receiver.try_recv().is_ok() {
-                            count += 1;
-                        }
-                    }
-                    Err(_) if receiver_done.load(Ordering::Acquire) => break,
-                    Err(_) => thread::yield_now(),
-                }
-            }
-            count
-        });
-
-        thread::sleep(WARMUP);
-        let msg = payload(size);
-        let deadline = Instant::now() + MEASURE;
-        while Instant::now() < deadline {
-            let mut pending = msg.clone();
-            loop {
-                match sender.try_send(pending) {
-                    Ok(()) => break,
-                    Err(omq_tokio::TrySendError::Full(returned)) => {
-                        pending = returned;
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("sender failed: {error}"),
-                }
-            }
-        }
-        sender.send(msg).expect("wakeup send");
-        done.store(true, Ordering::Release);
-        let count = receiver_thread.join().expect("receiver thread");
+        let rate = transfer_blocking(&sender, receiver, size);
         sender_ctx.term();
         receiver_ctx.term();
-        count as f64 / MEASURE.as_secs_f64()
+        rate
     })
     .await
     .expect("fan-in task")
@@ -329,11 +414,13 @@ async fn compare_fanin() {
 }
 
 async fn pubsub(size: usize, io_threads: usize, peers: usize) -> f64 {
-    let pub_ctx = Context::with_config(ContextConfig { io_threads });
-    let sub_ctx = Context::with_config(ContextConfig { io_threads });
+    let pub_ctx = context(io_threads, Side::Sender);
+    let sub_ctx = context(io_threads, Side::Receiver);
     let publisher = pub_ctx.socket(SocketType::Pub, Options::default());
     let endpoint = publisher.bind(tcp_zero()).await.expect("PUB bind");
-    let mut subscribers = Vec::with_capacity(peers);
+    let ready = Arc::new(tokio::sync::Barrier::new(peers + 1));
+    let mut receivers = Vec::with_capacity(peers);
+    let mut windows = Vec::with_capacity(peers);
     for _ in 0..peers {
         let subscriber = sub_ctx.socket(SocketType::Sub, Options::default());
         subscriber
@@ -344,69 +431,46 @@ async fn pubsub(size: usize, io_threads: usize, peers: usize) -> f64 {
             .subscribe(Bytes::new())
             .await
             .expect("SUB subscribe");
-        subscribers.push(subscriber);
+        let ready = ready.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        windows.push(tx);
+        receivers.push(tokio::spawn(async move {
+            ready.wait().await;
+            count_messages(subscriber, rx.await.expect("receive benchmark window")).await
+        }));
     }
     publisher
         .wait_subscribed(peers as u64, Duration::from_secs(1))
         .await
         .expect("SUB subscribe timeout");
-
-    let mut receivers = Vec::with_capacity(peers);
-    for subscriber in subscribers {
-        receivers.push(tokio::spawn(count_messages(
-            subscriber,
-            Instant::now() + WARMUP + MEASURE,
-        )));
+    ready.wait().await;
+    let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
+    for tx in windows {
+        tx.send(window).expect("send benchmark window");
     }
-    let msg = payload(size);
-    let warmup_deadline = Instant::now() + WARMUP;
-    'warmup: loop {
-        for _ in 0..256 {
-            if !try_send_until(&publisher, msg.clone(), warmup_deadline).await {
-                break 'warmup;
-            }
+    for (message, deadline) in [
+        (tagged_payload(size, 0), window.start),
+        (payload(size), window.end),
+    ] {
+        while send_batch_until(&publisher, &message, deadline).await {
+            tokio::task::yield_now().await;
         }
-        if Instant::now() >= warmup_deadline {
-            break;
-        }
-        tokio::task::yield_now().await;
     }
-    let deadline = Instant::now() + MEASURE;
-    'measure: loop {
-        for _ in 0..256 {
-            if !try_send_until(&publisher, msg.clone(), deadline).await {
-                break 'measure;
-            }
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let mut rx_count = 0;
+    let mut received = Received {
+        count: 0,
+        elapsed: SETTINGS.measure,
+    };
     for receiver in receivers {
-        rx_count += receiver.await.expect("SUB task");
+        received = received.combine(receiver.await.expect("SUB task"));
     }
     pub_ctx.term();
     sub_ctx.term();
-    rx_count as f64 / MEASURE.as_secs_f64()
-}
-
-fn send_blocking_retry(sock: &omq_tokio::blocking::Socket, mut msg: Message) {
-    loop {
-        match sock.try_send(msg) {
-            Ok(()) => return,
-            Err(omq_tokio::TrySendError::Full(returned)) => {
-                msg = returned;
-                thread::yield_now();
-            }
-            Err(error) => panic!("PUB send failed: {error}"),
-        }
-    }
+    received.rate()
 }
 
 fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize) {
-    let ctx = Context::with_config(ContextConfig { io_threads });
+    SETTINGS.affinity.pin(0);
+    let ctx = context(io_threads, Side::Sender);
     let options = Options {
         xpub_nodrop: true,
         ..Options::default()
@@ -418,98 +482,147 @@ fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize) {
     publisher
         .wait_subscribed(peers as u64, Duration::from_secs(10))
         .expect("SUB subscribe timeout");
-    let msg = payload(size);
-    loop {
-        send_blocking_retry(&publisher, msg.clone());
+    let measured = Arc::new(AtomicBool::new(false));
+    let measured_reader = measured.clone();
+    thread::spawn(move || {
+        let mut command = String::new();
+        std::io::stdin()
+            .read_line(&mut command)
+            .expect("read measurement command");
+        assert_eq!(command.trim(), "MEASURE");
+        measured_reader.store(true, Ordering::Release);
+    });
+    let warmup = tagged_payload(size, 0);
+    let message = payload(size);
+    let deadline = Instant::now() + SETTINGS.warmup + SETTINGS.measure + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let value = if measured.load(Ordering::Acquire) {
+            &message
+        } else {
+            &warmup
+        };
+        if !send_blocking_batch_until(&publisher, value, deadline) {
+            break;
+        }
+    }
+    panic!("PUB child exceeded measurement deadline");
+}
+
+fn run_pubsub_sub_child(endpoint: &Endpoint, duration: Duration, peers: usize) {
+    SETTINGS.affinity.pin(5);
+    let ctx = context(2, Side::Receiver);
+    let ready = Arc::new(Barrier::new(peers + 1));
+    let mut receivers = Vec::with_capacity(peers);
+    let mut windows = Vec::with_capacity(peers);
+    for index in 0..peers {
+        let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
+        subscriber.connect(endpoint.clone()).expect("SUB connect");
+        subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
+        let ready = ready.clone();
+        let (tx, rx) = mpsc::channel();
+        windows.push(tx);
+        receivers.push(thread::spawn(move || {
+            SETTINGS.affinity.pin(5 + index);
+            ready.wait();
+            count_blocking(&subscriber, rx.recv().expect("receive benchmark window"))
+        }));
+    }
+    ready.wait();
+    let warmup = duration_env("OMQ_PERF_WARMUP_MS", PUBSUB_32P_WARMUP);
+    let window = Window::new(Instant::now(), warmup, duration);
+    for tx in windows {
+        tx.send(window).expect("send benchmark window");
+    }
+    // The publisher tags all traffic as warmup until this command reaches it.
+    // Any warmup still in flight is discarded by the receiving counters.
+    thread::sleep(window.start.saturating_duration_since(Instant::now()));
+    println!("MEASURE");
+    std::io::stdout()
+        .flush()
+        .expect("flush measurement command");
+    let mut received = Received {
+        count: 0,
+        elapsed: duration,
+    };
+    for receiver in receivers {
+        received = received.combine(receiver.join().expect("SUB thread"));
+    }
+    ctx.term();
+    println!(
+        "RESULT {} {:.9}",
+        received.count,
+        received.elapsed.as_secs_f64()
+    );
+}
+
+#[derive(Debug)]
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
-fn run_pubsub_sub_child(endpoint: &Endpoint, size: usize, duration: Duration, peers: usize) {
-    let ctx = Context::with_config(ContextConfig { io_threads: 2 });
-    let drain_batch = if size <= 1024 { 64 } else { 256 };
-    let mut subscribers = Vec::with_capacity(peers);
-    for _ in 0..peers {
-        let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
-        subscriber
-            .connect((*endpoint).clone())
-            .expect("SUB connect");
-        subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
-        subscribers.push(subscriber);
+fn child_command() -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("current executable"));
+    let cpus = SETTINGS.affinity.csv();
+    if !cpus.is_empty() {
+        // Children otherwise inherit the caller's one-CPU mask.
+        command.env("OMQ_PERF_CPUS", cpus);
     }
-
-    thread::sleep(PUBSUB_32P_WARMUP);
-    let counters: Vec<_> = (0..peers).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let deadline = Instant::now() + duration;
-    let started = Instant::now();
-    let receivers: Vec<_> = subscribers
-        .into_iter()
-        .zip(counters.iter().cloned())
-        .map(|(subscriber, counter)| {
-            thread::spawn(move || {
-                let mut count = 0_u64;
-                while Instant::now() < deadline {
-                    if subscriber.try_recv().is_ok() {
-                        count += 1;
-                        for _ in 1..drain_batch {
-                            if subscriber.try_recv().is_err() {
-                                break;
-                            }
-                            count += 1;
-                        }
-                    } else {
-                        thread::yield_now();
-                    }
-                }
-                counter.store(count, Ordering::Relaxed);
-            })
-        })
-        .collect();
-    for receiver in receivers {
-        receiver.join().expect("SUB thread");
-    }
-    let elapsed = started.elapsed().as_secs_f64();
-    let total: u64 = counters
-        .iter()
-        .map(|counter| counter.load(Ordering::Relaxed))
-        .sum();
-    ctx.term();
-    println!("{total} {elapsed:.6}");
+    command
 }
 
 fn pubsub_process_published_rate(size: usize, io_threads: usize, peers: usize) -> f64 {
-    let exe = std::env::current_exe().expect("current executable");
-    let mut publisher = Command::new(&exe)
-        .arg("--pubsub-pub-child")
-        .arg(size.to_string())
-        .arg(io_threads.to_string())
-        .arg(peers.to_string())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn PUB child");
-    let stdout = publisher.stdout.take().expect("PUB stdout");
-    let mut reader = std::io::BufReader::new(stdout);
+    let mut publisher = ChildGuard(
+        child_command()
+            .arg("--pubsub-pub-child")
+            .arg(size.to_string())
+            .arg(io_threads.to_string())
+            .arg(peers.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn PUB child"),
+    );
+    let mut reader = std::io::BufReader::new(publisher.0.stdout.take().expect("PUB stdout"));
     let mut endpoint = String::new();
     reader.read_line(&mut endpoint).expect("read PUB endpoint");
-    let endpoint = endpoint.trim();
-    assert!(!endpoint.is_empty(), "PUB child did not report endpoint");
-
-    let output = Command::new(&exe)
-        .arg("--pubsub-sub-child")
-        .arg(endpoint)
-        .arg(size.to_string())
-        .arg(PUBSUB_32P_MEASURE.as_secs_f64().to_string())
-        .arg(peers.to_string())
-        .output()
-        .expect("run SUB child");
-    let _ = publisher.kill();
-    let _ = publisher.wait();
     assert!(
-        output.status.success(),
-        "SUB child failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !endpoint.trim().is_empty(),
+        "PUB child did not report endpoint"
     );
-    let stdout = String::from_utf8(output.stdout).expect("SUB stdout utf8");
-    let mut fields = stdout.split_whitespace();
+    let duration = duration_env("OMQ_PERF_MEASURE_MS", PUBSUB_32P_MEASURE);
+    let mut subscriber = ChildGuard(
+        child_command()
+            .arg("--pubsub-sub-child")
+            .arg(endpoint.trim())
+            .arg(size.to_string())
+            .arg(duration.as_secs_f64().to_string())
+            .arg(peers.to_string())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn SUB child"),
+    );
+    let mut reader = std::io::BufReader::new(subscriber.0.stdout.take().expect("SUB stdout"));
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("read SUB measurement command");
+    assert_eq!(line.trim(), "MEASURE");
+    let stdin = publisher.0.stdin.as_mut().expect("PUB stdin");
+    writeln!(stdin, "MEASURE").expect("send measurement command");
+    stdin.flush().expect("flush measurement command");
+    line.clear();
+    reader.read_line(&mut line).expect("read SUB result");
+    assert!(
+        subscriber.0.wait().expect("wait SUB child").success(),
+        "SUB child failed"
+    );
+    let mut fields = line.split_whitespace();
+    assert_eq!(fields.next(), Some("RESULT"));
     let total: f64 = fields
         .next()
         .and_then(|s| s.parse().ok())
@@ -518,6 +631,7 @@ fn pubsub_process_published_rate(size: usize, io_threads: usize, peers: usize) -
         .next()
         .and_then(|s| s.parse().ok())
         .expect("SUB elapsed");
+    assert!(elapsed.is_finite() && elapsed > 0.0);
     total / elapsed / peers as f64
 }
 
@@ -582,95 +696,262 @@ async fn run_mode(args: &[String]) -> bool {
         }
         Some("--pubsub-sub-child") => {
             let endpoint = args[2].parse().expect("endpoint");
-            let size = args[3].parse().expect("size");
             let duration = Duration::from_secs_f64(args[4].parse().expect("duration"));
             let peers = args[5].parse().expect("peers");
-            run_pubsub_sub_child(&endpoint, size, duration, peers);
+            run_pubsub_sub_child(&endpoint, duration, peers);
             true
         }
         _ => false,
     }
 }
 
+#[derive(Debug)]
+enum Workload {
+    Reqrep,
+    Pushpull {
+        size: usize,
+        io_threads: usize,
+        inproc: bool,
+    },
+    Pubsub {
+        size: usize,
+        io_threads: usize,
+        peers: usize,
+    },
+    PubsubProcesses,
+}
+
+#[derive(Debug)]
+struct Case {
+    name: String,
+    workload: Workload,
+}
+
+fn cases() -> Vec<Case> {
+    let mut cases = vec![Case {
+        name: "reqrep_ct.p50_256b_us".to_owned(),
+        workload: Workload::Reqrep,
+    }];
+    for io_threads in [1, 2] {
+        for (size, suffix) in [(16, "16b"), (1024, "1k"), (16 * 1024, "16k")] {
+            cases.push(Case {
+                name: format!("pushpull_{io_threads}io.{suffix}_msgs_s"),
+                workload: Workload::Pushpull {
+                    size,
+                    io_threads,
+                    inproc: false,
+                },
+            });
+        }
+        for (size, suffix) in [(16, "16b"), (4096, "4k")] {
+            cases.push(Case {
+                name: format!("pubsub_{io_threads}io.{suffix}_msgs_s"),
+                workload: Workload::Pubsub {
+                    size,
+                    io_threads,
+                    peers: 4,
+                },
+            });
+        }
+    }
+    cases.push(Case {
+        name: "pubsub_2io.256b_32p_msgs_s".to_owned(),
+        workload: Workload::PubsubProcesses,
+    });
+    cases.push(Case {
+        name: "inproc_pushpull_1io.16b_msgs_s".to_owned(),
+        workload: Workload::Pushpull {
+            size: 16,
+            io_threads: 1,
+            inproc: true,
+        },
+    });
+    cases
+}
+
+async fn measure(case: &Case) -> Sample {
+    let (value, unit) = match case.workload {
+        Workload::Reqrep => (reqrep_latency().await, "us"),
+        Workload::Pushpull {
+            size,
+            io_threads,
+            inproc,
+        } => (
+            pushpull(
+                size,
+                io_threads,
+                if inproc {
+                    inproc_endpoint()
+                } else {
+                    tcp_zero()
+                },
+            )
+            .await,
+            "msg/s",
+        ),
+        Workload::Pubsub {
+            size,
+            io_threads,
+            peers,
+        } => (pubsub(size, io_threads, peers).await, "msg/s"),
+        Workload::PubsubProcesses => (pubsub_process_published_rate(256, 2, 32), "msg/s"),
+    };
+    Sample {
+        name: case.name.clone(),
+        value,
+        unit,
+    }
+}
+
+#[derive(Debug, Default)]
+struct RunOptions {
+    case: Option<String>,
+    repeat: usize,
+    measure_only: bool,
+    list: bool,
+}
+
+impl RunOptions {
+    fn parse(args: &[String]) -> Self {
+        let mut options = Self {
+            repeat: 1,
+            ..Self::default()
+        };
+        let mut args = args.iter().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--case" => {
+                    options.case = Some(args.next().expect("--case requires a name").clone());
+                }
+                "--repeat" => {
+                    options.repeat = args
+                        .next()
+                        .expect("--repeat requires a count")
+                        .parse()
+                        .expect("invalid repeat count");
+                }
+                "--measure-only" => options.measure_only = true,
+                "--list" => options.list = true,
+                _ => panic!("unknown option: {arg}"),
+            }
+        }
+        assert!(options.repeat > 0, "repeat count must be positive");
+        options
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Read the available CPU mask before pinning this thread; child modes
+    // restore the explicit CPU list passed by their parent.
+    let _ = &*SETTINGS;
+    SETTINGS.affinity.pin(0);
     if run_mode(&args).await {
         return;
     }
-
+    let options = RunOptions::parse(&args);
+    let cases = cases();
+    if options.list {
+        for case in cases {
+            println!("{}", case.name);
+        }
+        return;
+    }
+    if let Some(name) = &options.case {
+        assert!(
+            cases.iter().any(|case| &case.name == name),
+            "unknown benchmark case: {name}"
+        );
+    }
     let thresholds = read_thresholds();
-    let mut ok = true;
-    let name = "reqrep_ct.p50_256b_us";
-    if should_measure(name, &thresholds) {
-        let latency = reqrep_latency().await;
-        ok &= verify(
-            &Sample {
-                name: name.to_string(),
-                value: latency,
-                unit: "us",
-            },
-            &thresholds.values,
-        );
+    println!("placement: {}", SETTINGS.affinity.description());
+    println!(
+        "warmup: {:?}, measurement: {:?}, repetitions: {}",
+        SETTINGS.warmup, SETTINGS.measure, options.repeat
+    );
+    if options.measure_only {
+        println!("measurement only: thresholds are not checked");
+    } else if thresholds.mode == ThresholdMode::Smoke {
+        println!(".perf_hw absent: using smoke thresholds");
     }
-    for io_threads in [1, 2] {
-        for (size, suffix) in [(16, "16b"), (1024, "1k"), (16 * 1024, "16k")] {
-            let name = format!("pushpull_{io_threads}io.{suffix}_msgs_s");
-            if should_measure(&name, &thresholds) {
-                let value = pushpull(size, io_threads, tcp_zero()).await;
-                ok &= verify(
-                    &Sample {
-                        name,
-                        value,
-                        unit: "msg/s",
-                    },
-                    &thresholds.values,
+    for case in cases {
+        if let Some(name) = &options.case {
+            if name != &case.name {
+                continue;
+            }
+        } else if !options.measure_only && !should_measure(&case.name, &thresholds) {
+            continue;
+        }
+        let mut samples = Vec::with_capacity(options.repeat);
+        for round in 0..options.repeat {
+            let sample = measure(&case).await;
+            assert!(sample.value.is_finite(), "invalid benchmark measurement");
+            if options.repeat > 1 {
+                println!(
+                    "  sample {}: {:.2} {}",
+                    round + 1,
+                    sample.value,
+                    sample.unit
                 );
             }
+            samples.push(sample);
         }
-        for (size, suffix, peers) in [(16, "16b", 4), (4096, "4k", 4)] {
-            let name = format!("pubsub_{io_threads}io.{suffix}_msgs_s");
-            if should_measure(&name, &thresholds) {
-                let value = pubsub(size, io_threads, peers).await;
-                ok &= verify(
-                    &Sample {
-                        name,
-                        value,
-                        unit: "msg/s",
-                    },
-                    &thresholds.values,
-                );
-            }
+        samples.sort_by(|a, b| a.value.total_cmp(&b.value));
+        let mut sample = samples[samples.len() / 2].clone();
+        if samples.len() % 2 == 0 {
+            sample.value = sample.value.midpoint(samples[samples.len() / 2 - 1].value);
+        }
+        if options.repeat > 1 {
+            println!(
+                "  range: {:.2}..{:.2} {} (result is median)",
+                samples[0].value,
+                samples[samples.len() - 1].value,
+                sample.unit
+            );
+        }
+        if options.measure_only {
+            println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
+        } else if !verify(&sample, &thresholds.values) {
+            // Do not spend time measuring later cases after a failed gate.
+            std::process::exit(1);
         }
     }
-    let name = "pubsub_2io.256b_32p_msgs_s";
-    if should_measure(name, &thresholds) {
-        let value = pubsub_process_published_rate(256, 2, 32);
-        ok &= verify(
-            &Sample {
-                name: name.to_string(),
-                value,
-                unit: "msg/s",
-            },
-            &thresholds.values,
-        );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_blocking_sender_stops_at_deadline() {
+        let ctx = Context::new();
+        let sock = ctx.blocking_socket(SocketType::Push, Options::default());
+        let start = Instant::now();
+        assert!(!send_blocking_batch_until(
+            &sock,
+            &payload(16),
+            start + Duration::from_millis(5)
+        ));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        ctx.term();
     }
-    let name = "inproc_pushpull_1io.16b_msgs_s";
-    if should_measure(name, &thresholds) {
-        let value = pushpull(16, 1, inproc_endpoint()).await;
-        ok &= verify(
-            &Sample {
-                name: name.to_string(),
-                value,
-                unit: "msg/s",
-            },
-            &thresholds.values,
-        );
+
+    #[tokio::test]
+    async fn full_async_sender_stops_at_deadline() {
+        let ctx = Context::current();
+        let sock = ctx.socket(SocketType::Push, Options::default());
+        let deadline = Instant::now() + Duration::from_millis(5);
+        assert!(!send_batch_until(&sock, &payload(16), deadline).await);
     }
-    if thresholds.mode == ThresholdMode::Smoke {
-        eprintln!("warning: .perf_hw missing; using smoke thresholds");
-    }
-    if !ok {
-        std::process::exit(1);
+
+    #[tokio::test]
+    async fn idle_receiver_finishes_without_a_wakeup_message() {
+        let ctx = Context::current();
+        let sock = ctx.socket(SocketType::Pull, Options::default());
+        let window = Window::new(Instant::now(), Duration::ZERO, Duration::from_millis(5));
+        let received = count_messages(sock, window).await;
+        assert_eq!(received.count, 0);
+        assert!(received.elapsed >= Duration::from_millis(5));
     }
 }

@@ -38,26 +38,27 @@ impl<T> Drop for AsyncRing<T> {
     }
 }
 
-/// Async sending half. Wakes the consumer on flush when the ring was empty.
+/// Async sending half. Wakes the consumer on flush.
 pub struct AsyncProducer<T> {
     ring: Arc<AsyncRing<T>>,
     cursor: Cursor,
     cached_head: Cursor,
 }
 
-// SAFETY: AsyncProducer<T> is Send because it is single-owner (not Sync) and
-// the underlying AsyncRing is Send+Sync.
+// SAFETY: Mutations require &mut self and the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncProducer<T> {}
 
-/// Async receiving half. Implements [`Stream`].
+/// Async receiving half. Implements [`Stream`], releasing each returned item.
+/// For batched slot release, use [`Self::prefetch`], [`Self::pop`] and
+/// [`Self::release`] explicitly.
 pub struct AsyncConsumer<T> {
     ring: Arc<AsyncRing<T>>,
     head: Cursor,
     cached_tail: Cursor,
+    released_head: Cursor,
 }
 
-// SAFETY: AsyncConsumer<T> is Send because it is single-owner (not Sync) and
-// the underlying AsyncRing is Send+Sync.
+// SAFETY: Mutations require &mut self and the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncConsumer<T> {}
 
 /// Create an async bounded SPSC ring with the given capacity (rounded up to
@@ -78,12 +79,13 @@ pub fn async_spsc<T>(capacity: usize) -> (AsyncProducer<T>, AsyncConsumer<T>) {
             ring,
             head: 0,
             cached_tail: 0,
+            released_head: 0,
         },
     )
 }
 
 impl<T> AsyncProducer<T> {
-    /// Write a value to the ring. Zero atomics. Returns `Err(val)` if full.
+    /// Write without atomics while cached space remains. Returns `Err(val)` if full.
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
         self.ring
@@ -118,6 +120,7 @@ impl<T> AsyncProducer<T> {
     /// Returns `Err(val)` only if the consumer has been dropped (the ring
     /// will never drain). On success the value is buffered but not yet
     /// visible to the consumer; call [`flush`](Self::flush) to publish.
+    /// Flush pending items before awaiting space in a full ring.
     #[inline]
     pub fn push_async(&mut self, val: T) -> PushFuture<'_, T> {
         PushFuture {
@@ -191,6 +194,15 @@ impl<T> Future for PushFuture<'_, T> {
                     return Poll::Ready(Err(returned));
                 }
                 this.producer.ring.producer_waker.0.register(cx.waker());
+                // Release acknowledges this registration after publishing
+                // head, or this exchange acquires its already-freed slots.
+                this.producer
+                    .ring
+                    .ring
+                    .producer_waiting
+                    .0
+                    .waiting
+                    .swap(true, Ordering::AcqRel);
                 match this.producer.push(returned) {
                     Ok(()) => Poll::Ready(Ok(())),
                     Err(returned) => {
@@ -224,8 +236,21 @@ impl<T> AsyncConsumer<T> {
     /// and wake the producer if it is waiting for space.
     #[inline]
     pub fn release(&mut self) {
+        if self.head == self.released_head {
+            return;
+        }
         self.ring.ring.release(self.head);
-        self.ring.producer_waker.0.wake();
+        self.released_head = self.head;
+        if self
+            .ring
+            .ring
+            .producer_waiting
+            .0
+            .waiting
+            .swap(false, Ordering::AcqRel)
+        {
+            self.ring.producer_waker.0.wake();
+        }
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
@@ -275,13 +300,12 @@ impl<T> Stream for AsyncConsumer<T> {
             this.prefetch();
         }
         if let Some(val) = this.pop() {
+            this.release();
             return Poll::Ready(Some(val));
         }
 
-        // Release BEFORE registering the waker. Reversing this order
-        // deadlocks: the producer could fill the freed slots and call
-        // wake() between register and release, and we'd park with data
-        // available and no pending wake.
+        // Also release items removed through the manual pop API before
+        // registering and rechecking for the next stream item.
         this.release();
 
         this.ring.consumer_waker.0.register(cx.waker());
@@ -291,9 +315,15 @@ impl<T> Stream for AsyncConsumer<T> {
             this.prefetch();
         }
         if let Some(val) = this.pop() {
+            this.release();
             Poll::Ready(Some(val))
         } else if this.ring.ring.producer_dropped.load(Ordering::Acquire) {
-            Poll::Ready(None)
+            // Acquiring shutdown orders the producer's final flush before
+            // this read. An earlier prefetch may precede that final flush.
+            this.prefetch();
+            let val = this.pop();
+            this.release();
+            Poll::Ready(val)
         } else {
             Poll::Pending
         }
@@ -402,6 +432,23 @@ mod tests {
             assert_eq!(c.next().await, Some(20));
             assert_eq!(c.next().await, Some(30));
         });
+    }
+
+    #[test]
+    fn stream_releases_slot_before_returning_item() {
+        use std::task::Waker;
+
+        let (mut p, mut c) = async_spsc::<u32>(1);
+        p.push_and_flush(10).unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+
+        assert_eq!(Pin::new(&mut c).poll_next(&mut cx), Poll::Ready(Some(10)));
+        assert_eq!(c.len(), 0);
+
+        // The caller may await a send before polling the stream again.
+        // Consuming the only item must free its slot without another next().
+        let mut push = p.push_async(20);
+        assert_eq!(Pin::new(&mut push).poll(&mut cx), Poll::Ready(Ok(())));
     }
 
     #[test]
