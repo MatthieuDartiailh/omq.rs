@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "loom",
 ]
