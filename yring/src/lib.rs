@@ -421,24 +421,29 @@ fn current_thread_token() -> usize {
         if current != 0 {
             return current;
         }
-        let mut next = NEXT_THREAD_TOKEN.load(std::sync::atomic::Ordering::Relaxed);
-        let current = loop {
-            let following = next
-                .checked_add(1)
-                .expect("ProducerOwner thread tokens exhausted");
-            match NEXT_THREAD_TOKEN.compare_exchange_weak(
-                next,
-                following,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            ) {
-                Ok(current) => break current,
-                Err(actual) => next = actual,
-            }
-        };
+        let current = allocate_thread_token(&NEXT_THREAD_TOKEN);
         token.set(current);
         current
     })
+}
+
+#[inline]
+fn allocate_thread_token(counter: &std::sync::atomic::AtomicUsize) -> usize {
+    let mut next = counter.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        let following = next
+            .checked_add(1)
+            .expect("ProducerOwner thread tokens exhausted");
+        match counter.compare_exchange_weak(
+            next,
+            following,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(current) => return current,
+            Err(actual) => next = actual,
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for ProducerOwner<T> {
@@ -884,62 +889,19 @@ mod tests {
         assert_ne!(first.is_ok(), second.is_ok());
     }
 
-    #[cfg(not(any(loom, miri)))]
+    #[cfg(not(loom))]
     #[test]
-    fn producer_owner_rejects_other_threads_after_token_wrap() {
-        use std::sync::{Arc, Barrier, mpsc};
+    fn producer_owner_tokens_never_wrap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        const CHILD_ENV: &str = "OMQ_YRING_TOKEN_WRAP_TEST_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            // Changing the global token counter must not affect other tests.
-            // Miri cannot launch this isolated subprocess.
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::producer_owner_rejects_other_threads_after_token_wrap",
-                    "--nocapture",
-                ])
-                .env(CHILD_ENV, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated token wrap test failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        let (producer, _consumer) = spsc::<u32>(4);
-        let owner = Arc::new(ProducerOwner::new(producer));
-        let barrier = Arc::new(Barrier::new(2));
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let first_owner = owner.clone();
-        let first_barrier = barrier.clone();
-        let first = std::thread::spawn(move || {
-            first_owner.push(1).unwrap();
-            ready_tx.send(()).unwrap();
-            first_barrier.wait();
-        });
-        ready_rx.recv().unwrap();
-
-        // Skip to wraparound while the original owner thread remains alive.
-        // New threads get MAX, 0, then the original owner's token (1).
-        NEXT_THREAD_TOKEN.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
-        let mut accepted = 0;
+        // Exercise the real allocator without exhausting other tests' tokens
+        // or relaunching this binary outside a cross-compilation runner.
+        let counter = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(allocate_thread_token(&counter), usize::MAX - 1);
         for _ in 0..3 {
-            let other_owner = owner.clone();
-            if std::thread::spawn(move || other_owner.push(2))
-                .join()
-                .is_ok()
-            {
-                accepted += 1;
-            }
+            assert!(std::panic::catch_unwind(|| allocate_thread_token(&counter)).is_err());
+            assert_eq!(counter.load(Ordering::Relaxed), usize::MAX);
         }
-        barrier.wait();
-        first.join().unwrap();
-        assert_eq!(accepted, 0, "another live thread passed the owner check");
     }
 
     #[test]
