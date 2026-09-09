@@ -285,7 +285,7 @@ class Socket(_BaseSocket):
 
     @overload
     def recv_multipart(
-        self, flags: int, copy: Literal[False], track: bool = False
+        self, flags: int = 0, copy: Literal[False] = False, track: bool = False
     ) -> Awaitable[list[Frame]]: ...
 
     def recv_multipart(self, flags=0, copy=True, track=False):

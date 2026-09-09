@@ -940,12 +940,12 @@ class _ShadowSocket(_SocketOptionsBase):
 
     @overload
     def recv_multipart(
-        self, flags: int, copy: Literal[True], track: bool
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
     ) -> list[bytes]: ...
 
     @overload
     def recv_multipart(
-        self, flags: int, copy: Literal[False], track: bool
+        self, flags: int = 0, copy: Literal[False] = False, track: bool = False
     ) -> list[Frame]: ...
 
     def recv_multipart(self, flags=0, copy=True, track=False):
