@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Callable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import pyomq
+
+from . import SENDABLE_TYPES
 
 
 def _get_IOLoop() -> type:
@@ -66,7 +69,7 @@ class ZMQStream:
 
     def send(
         self,
-        msg: bytes | str,
+        msg: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -81,7 +84,7 @@ class ZMQStream:
 
     def send_multipart(
         self,
-        msg_list: list[bytes | str],
+        msg_list: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -146,7 +149,7 @@ class ZMQStream:
             try:
                 io_loop.add_handler(fd, handler, _get_IOLoop().READ)  # type: ignore[ty:unresolved-attribute]
                 self._watching = True
-            except Exception:
+            except Exception:  # noqa S110
                 pass
 
         try:
@@ -161,7 +164,7 @@ class ZMQStream:
         self._watching = False
         try:
             self.io_loop.remove_handler(self._fd)
-        except Exception:
+        except Exception:  # noqa BLE001
             pass
 
     def close(self, linger: int | None = None) -> None:

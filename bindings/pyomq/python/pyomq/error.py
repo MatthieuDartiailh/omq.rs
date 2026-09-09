@@ -11,8 +11,7 @@ import builtins
 import errno as _errno
 from typing import Final
 
-from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
-from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
+from ._native import ZMQBaseError, ZMQError
 
 
 class Again(ZMQError):
@@ -23,7 +22,7 @@ class ContextTerminated(ZMQError):
     """Operation issued against a terminated Context (``ETERM`` ≈ 156)."""
 
 
-class NotImplementedError(ZMQError):  # noqa: A001  shadow OK; matches pyzmq
+class NotImplementedError(ZMQError):
     """The requested option / feature is not implemented in pyomq."""
 
 

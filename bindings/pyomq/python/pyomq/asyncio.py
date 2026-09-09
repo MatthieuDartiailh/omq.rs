@@ -23,20 +23,25 @@ import pickle
 import select as _select
 import sys
 import threading
+import types
 import weakref
 from collections import deque
-from typing import Any, Awaitable, Callable, Final
-from . import _native  # type: ignore[attr-defined]
-from . import error
-from . import Context as _SyncContext
-from . import _next_ctx_id
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, Final, Literal, Self, overload
+
 from . import (
-    LINGER,
     _TYPE_NAMES,
+    LINGER,
     POLLIN,
     POLLOUT,
+    SENDABLE_TYPES,
+    Frame,
     _BaseSocket,
+    _native,  # type: ignore[attr-defined]
+    _next_ctx_id,
+    error,
 )
+from . import Context as _SyncContext
 
 _IS_WINDOWS = sys.platform == "win32"
 _WAKEUP_MODE_NONE = 0
@@ -100,7 +105,7 @@ class _WindowsWaiter:
 class _RecvFuture:
     """Supports both ``await fut`` (event-loop) and ``fut.result()`` (blocking)."""
 
-    __slots__ = ("_try_fn", "_fd", "_result", "_exception")
+    __slots__ = ("_exception", "_fd", "_result", "_try_fn")
 
     _try_fn: Callable[[], Any]
     _fd: int
@@ -238,7 +243,7 @@ class Socket(_BaseSocket):
 
     def send(
         self,
-        data: Any,
+        data: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -260,7 +265,7 @@ class Socket(_BaseSocket):
 
     def send_multipart(
         self,
-        parts: list[Any],
+        parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -273,9 +278,17 @@ class Socket(_BaseSocket):
             raise error.from_native(e) from None
         return _SEND_DONE
 
+    @overload
     def recv_multipart(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> Awaitable[list[bytes] | list[Any]]:
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> Awaitable[list[bytes]]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int, copy: Literal[False], track: bool = False
+    ) -> Awaitable[list[Frame]]: ...
+
+    def recv_multipart(self, flags=0, copy=True, track=False):
         if not copy:
             return self._add_recv_event(self._sock._try_recv_multipart_frames)
         return self._add_recv_event(self._sock._try_recv_multipart)
@@ -441,7 +454,7 @@ class Socket(_BaseSocket):
             )
 
         def _send_with_backpressure(
-            self, data: Any, flags: int, copy: bool
+            self, data: SENDABLE_TYPES, flags: int, copy: bool
         ) -> asyncio.Future[Any]:
             def try_send() -> bool | None:
                 try:
@@ -460,7 +473,7 @@ class Socket(_BaseSocket):
             )
 
         def _send_multipart_with_backpressure(
-            self, parts: list[Any], flags: int, copy: bool
+            self, parts: Iterable[SENDABLE_TYPES], flags: int, copy: bool
         ) -> asyncio.Future[Any]:
             def try_send() -> bool | None:
                 try:
@@ -504,7 +517,7 @@ class Socket(_BaseSocket):
             return _RecvFuture(try_fn, fd)
 
         def _send_with_backpressure(
-            self, data: Any, flags: int, copy: bool
+            self, data: SENDABLE_TYPES, flags: int, copy: bool
         ) -> _RecvFuture:
             fd = self._sock._send_fd()
 
@@ -520,7 +533,7 @@ class Socket(_BaseSocket):
             return _RecvFuture(try_send, fd)
 
         def _send_multipart_with_backpressure(
-            self, parts: list[Any], flags: int, copy: bool
+            self, parts: Iterable[SENDABLE_TYPES], flags: int, copy: bool
         ) -> _RecvFuture:
             fd = self._sock._send_fd()
 
@@ -564,7 +577,7 @@ class Socket(_BaseSocket):
     def send_serialized(
         self,
         msg: Any,
-        serialize: Callable[[Any], list[bytes | str]],
+        serialize: Callable[[Any], list[SENDABLE_TYPES]],
         flags: int = 0,
         copy: bool = True,
         **kwargs: Any,
@@ -572,12 +585,23 @@ class Socket(_BaseSocket):
         frames = serialize(msg)
         return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
-    async def recv_serialized(
+    @overload
+    def recv_serialized(
         self,
         deserialize: Callable[[list[bytes]], Any],
         flags: int = 0,
-        copy: bool = True,
-    ) -> Any:
+        copy: Literal[True] = True,
+    ) -> Any: ...
+
+    @overload
+    def recv_serialized(
+        self,
+        deserialize: Callable[[list[Frame]], Any],
+        flags: int = 0,
+        copy: Literal[False] = False,
+    ) -> Any: ...
+
+    async def recv_serialized(self, deserialize, flags=0, copy=True) -> Any:
         frames = await self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
@@ -600,10 +624,15 @@ class Socket(_BaseSocket):
                 return mask
         return 0
 
-    async def __aenter__(self) -> Socket:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *args: Any) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: types.TracebackType | None = None,
+    ) -> bool:
         self.close()
         return False
 
@@ -703,7 +732,7 @@ class Context(_SyncContext):
         return s
 
     @classmethod
-    def from_share_key(cls, key: int) -> Context:
+    def from_share_key(cls, key: int) -> Self:
         obj = object.__new__(cls)
         obj._ctx = _native.AsyncContext.from_share_key(key)
         obj._is_shadow = True
@@ -734,14 +763,19 @@ class Context(_SyncContext):
         if not self._closed:
             self.term()
 
-    def __enter__(self) -> Context:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args: Any) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> bool:
         self.term()
         return False
 
 
 Context._socket_class = Socket
 
-__all__ = ["Context", "Socket", "Poller"]
+__all__ = ["Context", "Poller", "Socket"]
