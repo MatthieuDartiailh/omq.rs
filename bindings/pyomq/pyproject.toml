@@ -33,7 +33,7 @@ test = [
     "pyzmq>=25",
     "tornado>=6",
 ]
-lint = ["ruff==0.15.22"]
+lint = ["ruff==0.16.6"]
 type-check = ["ty==0.0.63"]
 dev = [
   { include-group = "test" },
