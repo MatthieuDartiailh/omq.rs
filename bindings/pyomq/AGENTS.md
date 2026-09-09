@@ -11,6 +11,18 @@ See [`doc/architecture.md`](../../doc/architecture.md) for internals:
 threading model, queue relay, send/recv paths, zero-copy conversions,
 proxy, authentication, error mapping, and known limitations.
 
+## Python native stub maintenance
+
+The native Python API is defined in `python/pyomq/_native.pyi` and is
+maintained manually. Treat this stub as the authoritative contract for
+`pyomq._native`.
+
+When a Rust-exported symbol changes in `src/lib.rs`—including any new
+`#[pyfunction]`, `#[pymodule_export]`, or `#[pyclass]` member—the stub
+must be kept in sync in the same change. Do not assume PyO3's generated
+information is complete enough to serve as a final API contract for the
+Python binding.
+
 ## Build / test / lint
 
 ```sh
