@@ -1,10 +1,8 @@
 """pyzmq-compatible API surface tests."""
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 # ── Serialization methods ────────────────────────────────────────────
 
@@ -206,7 +204,7 @@ def test_copy_false_multipart_recv_returns_frames():
         frames = pull.recv_multipart(copy=False)
         assert [bytes(frame) for frame in frames] == [b"a", b"bb", b"ccc"]
         assert all(isinstance(frame, zmq.Frame) for frame in frames)
-        assert [getattr(frame, "more") for frame in frames] == [True, True, False]
+        assert [frame.more for frame in frames] == [True, True, False]
     finally:
         push.close()
         pull.close()
@@ -685,7 +683,7 @@ def test_select_ready(tcp_endpoint):
         push.connect(ep)
         push.send(b"sel")
         time.sleep(0.05)
-        rready, wready, xready = zmq.select([pull], [], [], timeout=1.0)
+        rready, _wready, _xready = zmq.select([pull], [], [], timeout=1.0)
         assert pull in rready
     finally:
         push.close()

@@ -8,10 +8,9 @@ import threading
 import types
 from typing import Any
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
+import pytest
 
 
 async def _await(value):
@@ -108,7 +107,7 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
                 replacement.append(replacement_waiter)
                 replacement_created.set()
 
-        setattr(os_proxy, "close", close_and_reuse)
+        os_proxy.close = close_and_reuse
         monkeypatch.setattr(zmq_async, "os", os_proxy)
 
         asyncio.get_running_loop().call_soon(pending_task.cancel)

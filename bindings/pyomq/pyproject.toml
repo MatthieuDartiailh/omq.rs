@@ -52,6 +52,9 @@ addopts = "--ignore=tests/soak"
 timeout = 60
 timeout_method = "thread"
 
+[tool.ruff.lint]
+ignore = ["BLE001"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E402", "E702", "F401", "F841"]
 
