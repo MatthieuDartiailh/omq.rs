@@ -468,7 +468,7 @@ impl Monitor {
     }
 }
 
-fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyAny>> {
+fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     match ev {
         MonitorEvent::Listening { endpoint } => {
@@ -532,7 +532,7 @@ fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bo
             d.set_item("event", "unknown")?;
         }
     }
-    Ok(d.into_any())
+    Ok(d)
 }
 
 #[pymethods]
@@ -543,13 +543,13 @@ impl Monitor {
     /// Returns a dict with at minimum `{"event": "<name>"}` plus
     /// event-specific keys (`endpoint`, `connection_id`, etc.).
     #[pyo3(signature = (timeout_ms = -1))]
-    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyAny>> {
+    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         let ev = py.detach(|| {
             if timeout_ms < 0 {
@@ -568,13 +568,13 @@ impl Monitor {
 
     /// Try to receive without blocking. Raises `zmq.Again` if no event
     /// is available.
-    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         match self.rx.try_recv() {
             Ok(ev) => monitor_event_to_dict(py, &ev),
