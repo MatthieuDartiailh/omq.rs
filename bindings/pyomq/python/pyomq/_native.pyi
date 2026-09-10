@@ -6,13 +6,12 @@ Python/native API contract of pyomq.
 
 """
 
-import threading
-
 import builtins
 import sys
+import threading
 import types
-from collections.abc import Iterable, Sequence
-from typing import Any, Callable, Self, SupportsBytes, TypeAlias, TypedDict
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Self, SupportsBytes, TypeAlias, TypedDict
 
 if sys.version_info >= (3, 12):
     from collections.abc import Buffer
