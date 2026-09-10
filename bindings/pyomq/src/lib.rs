@@ -23,6 +23,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use pyo3::prelude::*;
+#[cfg(feature = "curve")]
 use pyo3::types::PyBytes;
 
 /// Extractor that accepts either a sync `Socket` or an `AsyncSocket`,
@@ -164,8 +165,8 @@ fn curve_keypair(py: Python<'_>) -> PyResult<(Bound<'_, PyBytes>, Bound<'_, PyBy
     let kp = omq_proto::CurveKeypair::generate();
     let pub_z85 = kp.public.to_z85();
     let sec_z85 = kp.secret.to_z85();
-    let pub_bytes = pyo3::types::PyBytes::new(py, pub_z85.as_bytes());
-    let sec_bytes = pyo3::types::PyBytes::new(py, sec_z85.as_bytes());
+    let pub_bytes = PyBytes::new(py, pub_z85.as_bytes());
+    let sec_bytes = PyBytes::new(py, sec_z85.as_bytes());
     Ok((pub_bytes, sec_bytes))
 }
 
@@ -179,7 +180,7 @@ fn curve_public<'py>(py: Python<'py>, secret_z85: &[u8]) -> PyResult<Bound<'py, 
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let pk = sk.derive_public();
     let pub_z85 = pk.to_z85();
-    Ok(pyo3::types::PyBytes::new(py, pub_z85.as_bytes()))
+    Ok(PyBytes::new(py, pub_z85.as_bytes()))
 }
 
 #[pyfunction]
