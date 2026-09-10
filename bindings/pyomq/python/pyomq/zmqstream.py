@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Iterable
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyomq
 
@@ -70,7 +70,7 @@ class ZMQStream:
 
     def send(
         self,
-        msg: "SENDABLE_TYPES",
+        msg: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -85,7 +85,7 @@ class ZMQStream:
 
     def send_multipart(
         self,
-        msg_list: Iterable["SENDABLE_TYPES"],
+        msg_list: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
