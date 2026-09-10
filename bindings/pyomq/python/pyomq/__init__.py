@@ -488,16 +488,10 @@ class _BaseSocket(_SocketOptionsBase):
     def fileno(self) -> int:
         return self.getsockopt(FD)
 
-    @overload
-    def bind(self, endpoint: str) -> str: ...
-
-    @overload
-    def bind(self, endpoint: bytes) -> bytes: ...
-
-    def bind(self, endpoint):
+    def bind(self, endpoint: str) -> str:
         try:
             ep = self._sock.bind(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
+            self._last_endpoint = ep.encode()
             return ep
         except _native.ZMQError as e:
             raise error.from_native(e) from None
@@ -514,24 +508,20 @@ class _BaseSocket(_SocketOptionsBase):
             ep = ep.decode()
         return int(ep.rsplit(":", 1)[1])
 
-    def connect(self, endpoint: str | bytes) -> None:
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
+    def connect(self, endpoint: str) -> None:
         try:
             self._sock.connect(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = (
-                endpoint.encode() if isinstance(endpoint, str) else endpoint
-            )
+            self._last_endpoint = endpoint.encode()
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def unbind(self, endpoint: str | bytes) -> None:
+    def unbind(self, endpoint: str) -> None:
         try:
             return self._sock.unbind(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def disconnect(self, endpoint: str | bytes) -> None:
+    def disconnect(self, endpoint: str) -> None:
         try:
             return self._sock.disconnect(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
@@ -1101,7 +1091,7 @@ class Context(metaclass=_ContextMeta):
             _shadow_ctx._ctx_id if _shadow_ctx is not None else next(_next_ctx_id)
         )
 
-    def _namespace_inproc(self, endpoint: str | bytes) -> str | bytes:
+    def _namespace_inproc(self, endpoint: str) -> str:
         # `inproc://` names are scoped by the native context core. Keep the
         # user endpoint unchanged so LAST_ENDPOINT and errors match input.
         return endpoint
