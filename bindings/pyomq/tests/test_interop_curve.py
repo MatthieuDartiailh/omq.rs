@@ -33,27 +33,24 @@ def test_pyomq_curve_server_pyzmq_curve_client_push_pull(tcp_endpoint):
     server_pub, server_sec = pyomq.curve_keypair()
     client_pub, client_sec = zmq_pyzmq.curve_keypair()
 
-    ctx = pyomq.Context()
-    pull = ctx.socket(pyomq.PULL)
-    pull.curve_server = 1
-    pull.curve_publickey = server_pub
-    pull.curve_secretkey = server_sec
-    ep = pull.bind(tcp_endpoint)
-
-    py_ctx = zmq_pyzmq.Context.instance()
-    push = py_ctx.socket(zmq_pyzmq.PUSH)
-    push.curve_serverkey = server_pub
-    push.curve_publickey = client_pub
-    push.curve_secretkey = client_sec
-    push.connect(ep)
-    try:
-        push.send(b"from-pyzmq-curve")
-        pull.setsockopt(pyomq.RCVTIMEO, 5000)
-        assert pull.recv() == b"from-pyzmq-curve"
-    finally:
-        push.close()
-        pull.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        pull = ctx.socket(pyomq.PULL)
+        pull.curve_server = 1
+        pull.curve_publickey = server_pub
+        pull.curve_secretkey = server_sec
+        with pull.bind(tcp_endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            push = py_ctx.socket(zmq_pyzmq.PUSH)
+            push.curve_serverkey = server_pub
+            push.curve_publickey = client_pub
+            push.curve_secretkey = client_sec
+            push.connect(s.last_endpoint)
+            try:
+                push.send(b"from-pyzmq-curve")
+                pull.setsockopt(pyomq.RCVTIMEO, 5000)
+                assert pull.recv() == b"from-pyzmq-curve"
+            finally:
+                push.close()
 
 
 @_skip_no_curve
@@ -61,30 +58,24 @@ def test_pyomq_curve_server_pyzmq_curve_client_req_rep(tcp_endpoint):
     server_pub, server_sec = pyomq.curve_keypair()
     client_pub, client_sec = zmq_pyzmq.curve_keypair()
 
-    ctx = pyomq.Context()
-    rep = ctx.socket(pyomq.REP)
-    rep.curve_server = 1
-    rep.curve_publickey = server_pub
-    rep.curve_secretkey = server_sec
-    ep = rep.bind(tcp_endpoint)
-
-    py_ctx = zmq_pyzmq.Context.instance()
-    req = py_ctx.socket(zmq_pyzmq.REQ)
-    req.curve_serverkey = server_pub
-    req.curve_publickey = client_pub
-    req.curve_secretkey = client_sec
-    req.connect(ep)
-    try:
-        req.send(b"ping")
-        rep.setsockopt(pyomq.RCVTIMEO, 5000)
-        assert rep.recv() == b"ping"
-        rep.send(b"pong")
-        req.setsockopt(zmq_pyzmq.RCVTIMEO, 5000)
-        assert req.recv() == b"pong"
-    finally:
-        req.close()
-        rep.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        rep = ctx.socket(pyomq.REP)
+        rep.curve_server = 1
+        rep.curve_publickey = server_pub
+        rep.curve_secretkey = server_sec
+        with rep.bind(tcp_endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            req = py_ctx.socket(zmq_pyzmq.REQ)
+            req.curve_serverkey = server_pub
+            req.curve_publickey = client_pub
+            req.curve_secretkey = client_sec
+            with req.connect(s.last_endpoint):
+                req.send(b"ping")
+                rep.setsockopt(pyomq.RCVTIMEO, 5000)
+                assert rep.recv() == b"ping"
+                rep.send(b"pong")
+                req.setsockopt(zmq_pyzmq.RCVTIMEO, 5000)
+                assert req.recv() == b"pong"
 
 
 # ── pyzmq server, pyomq client ──────────────────────────────────────

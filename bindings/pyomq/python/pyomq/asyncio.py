@@ -328,13 +328,13 @@ class Socket(_BaseSocket):
 
     def send_multipart(
         self,
-        parts: Iterable[SENDABLE_TYPES],
+        msg_parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> FutureResult[MessageTracker | None]:
         try:
-            result = self._sock.send_multipart(parts, flags, copy, track)
+            result = self._sock.send_multipart(msg_parts, flags, copy, track)
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
                 return self._send_with_backpressure(e._pending_send)

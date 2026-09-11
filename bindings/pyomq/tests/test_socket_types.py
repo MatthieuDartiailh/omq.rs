@@ -310,32 +310,31 @@ def test_radio_dish_helpers_accept_str_groups():
 
 def test_stream_raw_tcp():
     """STREAM socket accepts raw TCP and echoes data back."""
-    ctx = pyomq.Context()
-    stream = ctx.socket(pyomq.STREAM)
-    ep = stream.bind("tcp://127.0.0.1:0")
-    stream.setsockopt(pyomq.RCVTIMEO, 1000)
+    with pyomq.Context() as ctx:
+        stream = ctx.socket(pyomq.STREAM)
+        with stream.bind("tcp://127.0.0.1:0") as s:
+            stream.setsockopt(pyomq.RCVTIMEO, 1000)
 
-    raw = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_STREAM)
-    host, port = ep.replace("tcp://", "").split(":")
-    raw.connect((host, int(port)))
-    raw.sendall(b"hello")
+            raw = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_STREAM)
+            assert s.last_endpoint
+            host, port = s.last_endpoint.decode().replace("tcp://", "").split(":")
+            raw.connect((host, int(port)))
+            raw.sendall(b"hello")
 
-    # Connect notification: [identity, b""]
-    parts = stream.recv_multipart()
-    assert len(parts) == 2
-    identity = parts[0]
-    assert len(identity) > 0
-    assert parts[1] == b""
+            # Connect notification: [identity, b""]
+            parts = stream.recv_multipart()
+            assert len(parts) == 2
+            identity = parts[0]
+            assert len(identity) > 0
+            assert parts[1] == b""
 
-    # Data: [identity, payload]
-    parts = stream.recv_multipart()
-    assert parts == [identity, b"hello"]
+            # Data: [identity, payload]
+            parts = stream.recv_multipart()
+            assert parts == [identity, b"hello"]
 
-    # Echo back via [identity, payload]
-    stream.send_multipart([identity, b"world"])
-    echoed = raw.recv(1024)
-    assert echoed == b"world"
+            # Echo back via [identity, payload]
+            stream.send_multipart([identity, b"world"])
+            echoed = raw.recv(1024)
+            assert echoed == b"world"
 
-    raw.close()
-    stream.close()
-    ctx.term()
+            raw.close()

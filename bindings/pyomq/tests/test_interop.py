@@ -67,19 +67,14 @@ def test_pyomq_push_pyzmq_pull(endpoint):
 
 @_TRANSPORTS
 def test_pyzmq_push_pyomq_pull(endpoint):
-    ctx = pyomq.Context()
-    pull = ctx.socket(pyomq.PULL)
-    ep = pull.bind(endpoint)
-    try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        push = py_ctx.socket(zmq_pyzmq.PUSH)
-        push.connect(ep)
-        push.send(b"from-pyzmq")
-        assert pull.recv() == b"from-pyzmq"
-        push.close()
-    finally:
-        pull.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        pull = ctx.socket(pyomq.PULL)
+        with pull.bind(endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            push = py_ctx.socket(zmq_pyzmq.PUSH)
+            with push.connect(s.last_endpoint):
+                push.send(b"from-pyzmq")
+                assert pull.recv() == b"from-pyzmq"
 
 
 # ---------- PUB / SUB ----------
@@ -87,23 +82,18 @@ def test_pyzmq_push_pyomq_pull(endpoint):
 
 @_TRANSPORTS
 def test_pyomq_pub_pyzmq_sub(endpoint):
-    ctx = pyomq.Context()
-    pub = ctx.socket(pyomq.PUB)
-    ep = pub.bind(endpoint)
-    try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        sub = py_ctx.socket(zmq_pyzmq.SUB)
-        sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
-        sub.connect(ep)
-        _settle()
-        pub.send(b"cold/skip")
-        pub.send(b"hot/take")
-        sub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
-        assert sub.recv() == b"hot/take"
-        pub.close()
-        ctx.term()
-    finally:
-        sub.close()
+    with pyomq.Context() as ctx:
+        pub = ctx.socket(pyomq.PUB)
+        with pub.bind(endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            sub = py_ctx.socket(zmq_pyzmq.SUB)
+            sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
+            with sub.connect(s.last_endpoint):
+                _settle()
+                pub.send(b"cold/skip")
+                pub.send(b"hot/take")
+                sub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
+                assert sub.recv() == b"hot/take"
 
 
 @_TRANSPORTS
@@ -161,21 +151,17 @@ def test_pyomq_req_pyzmq_rep(endpoint):
 
 @_TRANSPORTS
 def test_pyzmq_req_pyomq_rep(endpoint):
-    ctx = pyomq.Context()
-    rep = ctx.socket(pyomq.REP)
-    ep = rep.bind(endpoint)
-    try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        req = py_ctx.socket(zmq_pyzmq.REQ)
-        req.connect(ep)
-        req.send(b"ping")
-        assert rep.recv() == b"ping"
-        rep.send(b"pong")
-        assert req.recv() == b"pong"
-        req.close()
-    finally:
-        rep.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        rep = ctx.socket(pyomq.REP)
+        with rep.bind(endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            req = py_ctx.socket(zmq_pyzmq.REQ)
+            req.connect(s.last_endpoint)
+            req.send(b"ping")
+            assert rep.recv() == b"ping"
+            rep.send(b"pong")
+            assert req.recv() == b"pong"
+            req.close()
 
 
 # ---------- DEALER / ROUTER ----------
@@ -210,24 +196,20 @@ def test_pyomq_dealer_pyzmq_router(endpoint):
 
 @_TRANSPORTS
 def test_pyzmq_dealer_pyomq_router(endpoint):
-    ctx = pyomq.Context()
-    router = ctx.socket(pyomq.ROUTER)
-    ep = router.bind(endpoint)
-    try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        dealer = py_ctx.socket(zmq_pyzmq.DEALER)
-        dealer.setsockopt(zmq_pyzmq.IDENTITY, b"D")
-        dealer.connect(ep)
-        dealer.send(b"hi")
-        parts = router.recv_multipart()
-        assert parts[0] == b"D"
-        assert parts[-1] == b"hi"
-        router.send_multipart([b"D", b"back"])
-        assert dealer.recv() == b"back"
-        dealer.close()
-    finally:
-        router.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        router = ctx.socket(pyomq.ROUTER)
+        with router.bind(endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            dealer = py_ctx.socket(zmq_pyzmq.DEALER)
+            dealer.setsockopt(zmq_pyzmq.IDENTITY, b"D")
+            dealer.connect(s.last_endpoint)
+            dealer.send(b"hi")
+            parts = router.recv_multipart()
+            assert parts[0] == b"D"
+            assert parts[-1] == b"hi"
+            router.send_multipart([b"D", b"back"])
+            assert dealer.recv() == b"back"
+            dealer.close()
 
 
 # ---------- PAIR ----------
@@ -265,30 +247,26 @@ def test_pyomq_xpub_pyzmq_xsub(endpoint):
     """XPUB receives subscribes from XSUB and filters its publishes
     accordingly. Exercises both ZMTP 3.1 SUBSCRIBE commands and the
     legacy 3.0 0x01-prefix message form pyzmq XSUB emits."""
-    ctx = pyomq.Context()
-    xpub = ctx.socket(pyomq.XPUB)
-    ep = xpub.bind(endpoint)
-    try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        xsub = py_ctx.socket(zmq_pyzmq.XSUB)
-        xsub.connect(ep)
-        xsub.send(b"\x01hot/")  # legacy ZMTP 3.0 subscribe
-        # XPUB surfaces the subscribe as a 0x01-prefixed message.
-        xpub.setsockopt(pyomq.RCVTIMEO, 1000)
-        sub_msg = xpub.recv()
-        assert sub_msg == b"\x01hot/"
-        xsub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
-        for _ in range(20):
-            xpub.send(b"cold/skip")
-            xpub.send(b"hot/take")
-            try:
-                assert xsub.recv() == b"hot/take"
-                break
-            except zmq_pyzmq.Again:
-                time.sleep(0.05)
-        else:
-            pytest.fail("XSUB never received hot/take")
-        xsub.close()
-    finally:
-        xpub.close()
-        ctx.term()
+    with pyomq.Context() as ctx:
+        xpub = ctx.socket(pyomq.XPUB)
+        with xpub.bind(endpoint) as s:
+            py_ctx = zmq_pyzmq.Context.instance()
+            xsub = py_ctx.socket(zmq_pyzmq.XSUB)
+            xsub.connect(s.last_endpoint)
+            xsub.send(b"\x01hot/")  # legacy ZMTP 3.0 subscribe
+            # XPUB surfaces the subscribe as a 0x01-prefixed message.
+            xpub.setsockopt(pyomq.RCVTIMEO, 1000)
+            sub_msg = xpub.recv()
+            assert sub_msg == b"\x01hot/"
+            xsub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
+            for _ in range(20):
+                xpub.send(b"cold/skip")
+                xpub.send(b"hot/take")
+                try:
+                    assert xsub.recv() == b"hot/take"
+                    break
+                except zmq_pyzmq.Again:
+                    time.sleep(0.05)
+            else:
+                pytest.fail("XSUB never received hot/take")
+            xsub.close()

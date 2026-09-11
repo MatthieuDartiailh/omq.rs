@@ -109,6 +109,18 @@ from ._native import (
     backend_name,
     version,
 )
+from ._tracker import MessageTracker, NotDone
+from ._typing import (
+    AuthCallback,
+    ConnectionInfo,
+    CurveAuth,
+    FutureResult,
+    MonitorEvent,
+    PlainAuth,
+    Sendable,
+    _BytesOption,
+    _IntOption,
+)
 from .error import (
     Again,
     ContextTerminated,
@@ -121,6 +133,7 @@ from .error import (
 from .error import (
     NotImplementedError as ZMQNotImplementedError,
 )
+from .zmqstream import ZMQStream
 
 if TYPE_CHECKING:
     from .asyncio import Socket as AsyncSocket
@@ -198,19 +211,6 @@ EADDRNOTAVAIL: Final[int] = _errno.EADDRNOTAVAIL
 __version__: Final[str] = version()
 zmq_version_info: Final[tuple[int, int, int]] = (4, 3, 4)
 
-from ._tracker import MessageTracker, NotDone
-from ._typing import (
-    AuthCallback,
-    ConnectionInfo,
-    CurveAuth,
-    FutureResult,
-    MonitorEvent,
-    PlainAuth,
-    Sendable,
-    _BytesOption,
-    _IntOption,
-)
-
 SENDABLE_TYPES = Sendable
 
 # ── Top-level functions ──────────────────────────────────────────────
@@ -248,12 +248,12 @@ def curve_keypair() -> tuple[bytes, bytes]:
     return _native.curve_keypair()
 
 
-def curve_public(secret: bytes | str) -> bytes:
+def curve_public(secret_key: bytes | str) -> bytes:
     if not hasattr(_native, "curve_public"):
         raise ZMQNotImplementedError("curve feature not compiled")
-    if isinstance(secret, str):
-        secret = secret.encode("ascii")
-    return _native.curve_public(secret)
+    if isinstance(secret_key, str):
+        secret_key = secret_key.encode("ascii")
+    return _native.curve_public(secret_key)
 
 
 if hasattr(_native, "PeerInfo"):
@@ -290,6 +290,46 @@ _TYPE_NAMES: Final[dict[int, str]] = {
 
 
 Message = Frame
+
+
+class _SocketContext[ST: _BaseSocket]:
+    """Context manager for socket bind/unbind and connect/disconnect."""
+
+    socket: ST
+    kind: str
+    addr: str
+
+    def __init__(self, socket: ST, kind: str, addr: str) -> None:
+        assert kind in {"bind", "connect"}
+        self.socket = socket
+        self.kind = kind
+        self.addr = addr
+
+    def __repr__(self) -> str:
+        return f"<SocketContext({self.kind}={self.addr!r})>"
+
+    def __str__(self) -> str:
+        return self.addr
+
+    def __bytes__(self) -> bytes:
+        return self.addr.encode("utf-8")
+
+    def __enter__(self) -> ST:
+        return self.socket
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> None:
+        sock = cast(Any, self.socket)
+        if getattr(sock, "closed", False):
+            return
+        if self.kind == "bind":
+            sock.unbind(self.addr)
+        elif self.kind == "connect":
+            sock.disconnect(self.addr)
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
@@ -451,9 +491,9 @@ class _SocketOptionsBase:
         return self.getsockopt(option)
 
     def setsockopt_string(
-        self, option: int, value: str, encoding: str = "utf-8"
+        self, option: int, optval: str, encoding: str = "utf-8"
     ) -> None:
-        return self.setsockopt(option, value.encode(encoding))
+        return self.setsockopt(option, optval.encode(encoding))
 
     def getsockopt_string(self, option: int, encoding: str = "utf-8") -> str:
         v = self.getsockopt(option)
@@ -461,7 +501,14 @@ class _SocketOptionsBase:
             return v.decode(encoding)
         return str(v)
 
-    set_string = setsockopt_string
+    def set_string(
+        self,
+        option: int,
+        optval: str,
+        encoding: str = "utf-8",
+    ) -> Any:
+        return self.setsockopt_string(option, optval=optval, encoding=encoding)
+
     get_string = getsockopt_string
 
 
@@ -514,20 +561,18 @@ class _BaseSocket(_SocketOptionsBase):
     def fileno(self) -> int:
         return self.getsockopt(FD)
 
-    @overload
-    def bind(self, endpoint: str) -> str: ...
-
-    @overload
-    def bind(self, endpoint: bytes) -> bytes: ...
-
-    def bind(self, endpoint: str | bytes) -> str | bytes:
-        as_bytes = isinstance(endpoint, bytes)
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
+    def bind(
+        self,
+        addr: str | bytes | _SocketContext,
+    ) -> _SocketContext[Self]:
+        if isinstance(addr, _SocketContext):
+            addr = addr.addr
+        elif isinstance(addr, bytes):
+            addr = addr.decode()
         try:
-            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
-            return ep.encode("utf-8") if as_bytes else ep
+            ep = self._sock.bind(self._context._namespace_inproc(addr))
+            self._last_endpoint = ep.encode()
+            return _SocketContext(self, "bind", addr=ep)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -538,33 +583,40 @@ class _BaseSocket(_SocketOptionsBase):
         max_port: int = 65536,
         max_tries: int = 100,
     ) -> int:
-        ep = self.bind(f"{addr}:0")
-        if isinstance(ep, bytes):
-            ep = ep.decode()
+        ep_ctx = self.bind(f"{addr}:0")
+        ep = str(ep_ctx)
         return int(ep.rsplit(":", 1)[1])
 
-    def connect(self, endpoint: str | bytes) -> None:
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
+    def connect(
+        self,
+        addr: str | bytes | _SocketContext,
+    ) -> _SocketContext[Self]:
+        if isinstance(addr, _SocketContext):
+            addr = addr.addr
+        elif isinstance(addr, bytes):
+            addr = addr.decode()
         try:
-            self._sock.connect(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = (
-                endpoint.encode() if isinstance(endpoint, str) else endpoint
-            )
+            self._sock.connect(self._context._namespace_inproc(addr))
+            self._last_endpoint = addr.encode()
+            return _SocketContext(self, "connect", addr)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def unbind(self, endpoint: str | bytes) -> None:
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
+    def unbind(self, endpoint: str | bytes | _SocketContext) -> None:
+        if isinstance(endpoint, _SocketContext):
+            endpoint = endpoint.addr
+        elif isinstance(endpoint, bytes):
+            endpoint = endpoint.decode()
         try:
             return self._sock.unbind(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def disconnect(self, endpoint: str | bytes) -> None:
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
+    def disconnect(self, endpoint: str | bytes | _SocketContext) -> None:
+        if isinstance(endpoint, _SocketContext):
+            endpoint = endpoint.addr
+        elif isinstance(endpoint, bytes):
+            endpoint = endpoint.decode()
         try:
             return self._sock.disconnect(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
@@ -572,18 +624,18 @@ class _BaseSocket(_SocketOptionsBase):
 
     # ── Subscriptions ────────────────────────────────────────────────
 
-    def subscribe(self, prefix: bytes | str) -> None:
+    def subscribe(self, topic: bytes | str) -> None:
         try:
             return self._sock.subscribe(
-                prefix.encode() if isinstance(prefix, str) else prefix
+                topic.encode() if isinstance(topic, str) else topic
             )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def unsubscribe(self, prefix: bytes | str) -> None:
+    def unsubscribe(self, topic: bytes | str) -> None:
         try:
             return self._sock.unsubscribe(
-                prefix.encode() if isinstance(prefix, str) else prefix
+                topic.encode() if isinstance(topic, str) else topic
             )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
@@ -732,13 +784,13 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send_multipart(
         self,
-        parts: Iterable[SENDABLE_TYPES],
+        msg_parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
         try:
-            return self._sock.send_multipart(parts, flags, copy, track)
+            return self._sock.send_multipart(msg_parts, flags, copy, track)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -1461,8 +1513,6 @@ def proxy_steerable(
 def device(device_type: int, frontend: Socket, backend: Socket) -> None:
     proxy(frontend, backend)
 
-
-from .zmqstream import ZMQStream
 
 __all__ = [  # noqa: RUF022
     "AuthCallback",
