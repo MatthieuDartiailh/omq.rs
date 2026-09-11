@@ -30,8 +30,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Final,
-    Generic,
-    TypeVar,
     Literal,
     Self,
     cast,
@@ -111,18 +109,6 @@ from ._native import (
     backend_name,
     version,
 )
-from .error import (
-    Again,
-    ContextTerminated,
-    InterruptedSystemCall,
-    ZMQBaseError,
-    ZMQBindError,
-    ZMQError,
-    ZMQVersionError,
-)
-from .error import (
-    NotImplementedError as ZMQNotImplementedError,
-)
 from ._tracker import MessageTracker, NotDone
 from ._typing import (
     AuthCallback,
@@ -135,8 +121,19 @@ from ._typing import (
     _BytesOption,
     _IntOption,
 )
+from .error import (
+    Again,
+    ContextTerminated,
+    InterruptedSystemCall,
+    ZMQBaseError,
+    ZMQBindError,
+    ZMQError,
+    ZMQVersionError,
+)
+from .error import (
+    NotImplementedError as ZMQNotImplementedError,
+)
 from .zmqstream import ZMQStream
-
 
 if TYPE_CHECKING:
     from .asyncio import Socket as AsyncSocket
@@ -293,17 +290,16 @@ _TYPE_NAMES: Final[dict[int, str]] = {
 
 
 Message = Frame
-_SocketType = TypeVar("_SocketType")
 
 
-class _SocketContext(Generic[_SocketType]):
+class _SocketContext[ST: _BaseSocket]:
     """Context manager for socket bind/unbind and connect/disconnect."""
 
-    socket: _SocketType
+    socket: ST
     kind: str
     addr: str
 
-    def __init__(self, socket: _SocketType, kind: str, addr: str) -> None:
+    def __init__(self, socket: ST, kind: str, addr: str) -> None:
         assert kind in {"bind", "connect"}
         self.socket = socket
         self.kind = kind
@@ -318,10 +314,15 @@ class _SocketContext(Generic[_SocketType]):
     def __bytes__(self) -> bytes:
         return self.addr.encode("utf-8")
 
-    def __enter__(self) -> _SocketType:
+    def __enter__(self) -> ST:
         return self.socket
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> None:
         sock = cast(Any, self.socket)
         if getattr(sock, "closed", False):
             return
