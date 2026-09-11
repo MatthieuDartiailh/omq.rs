@@ -13,6 +13,18 @@ from typing import Final
 
 from ._native import ZMQBaseError, ZMQError
 
+__all__ = [
+    "Again",
+    "ContextTerminated",
+    "InterruptedSystemCall",
+    "NotImplementedError",
+    "ZMQBaseError",
+    "ZMQBindError",
+    "ZMQError",
+    "ZMQVersionError",
+    "from_native",
+]
+
 
 class Again(ZMQError):
     """Non-blocking call would block (``EAGAIN`` / timeout elapsed)."""

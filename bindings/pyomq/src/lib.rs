@@ -16,6 +16,7 @@ mod peer_info;
 mod runtime;
 mod socket;
 mod socket_async;
+mod tracker;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,6 +58,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<socket::Monitor>()?;
     m.add_class::<socket::Socket>()?;
     m.add_class::<socket_async::AsyncSocket>()?;
+    m.add_class::<socket_async::PendingSend>()?;
+    m.add_class::<tracker::ReleaseToken>()?;
     m.add_function(wrap_pyfunction!(backend_name, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;

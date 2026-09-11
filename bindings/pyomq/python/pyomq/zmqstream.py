@@ -10,15 +10,22 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import pyomq
 
+from . import SENDABLE_TYPES
+from ._typing import _BytesOption, _IntOption
+
 if TYPE_CHECKING:
-    from . import SENDABLE_TYPES
+    from tornado.ioloop import IOLoop
+
+type SendCallback = Callable[
+    [list[SENDABLE_TYPES], pyomq.MessageTracker | None], object
+]
 
 
-def _get_IOLoop() -> type:
+def _get_IOLoop() -> type[IOLoop]:
     from tornado.ioloop import IOLoop
 
     return IOLoop
@@ -28,18 +35,18 @@ class ZMQStream:
     """Integration layer for pyomq sockets with Tornado IOLoop."""
 
     socket: pyomq.Socket
-    io_loop: Any  # tornado.ioloop.IOLoop
-    _recv_callback: Callable[[Any], Any] | None
+    io_loop: IOLoop
+    _recv_callback: Callable[[Any], object] | None
     _recv_copy: bool
-    _send_callback: Callable[[Any, Any | None], Any] | None
+    _send_callback: SendCallback | None
     _closed: bool
     _fd: int
     _watching: bool
 
-    def __init__(self, socket: pyomq.Socket, io_loop: Any | None = None) -> None:
+    def __init__(self, socket: pyomq.Socket, io_loop: IOLoop | None = None) -> None:
         IOLoop = _get_IOLoop()
         self.socket = socket
-        self.io_loop = io_loop or IOLoop.current()  # type: ignore[ty:unresolved-attribute]
+        self.io_loop = io_loop or IOLoop.current()
         self._recv_callback = None
         self._recv_copy = True
         self._send_callback = None
@@ -47,7 +54,30 @@ class ZMQStream:
         self._fd = socket.getsockopt(pyomq.FD)
         self._watching = False
 
-    def on_recv(self, callback: Callable[[Any], Any] | None, copy: bool = True) -> None:
+    @overload
+    def on_recv(
+        self,
+        callback: Callable[[list[bytes]], object] | None,
+        copy: Literal[True] = True,
+    ) -> None: ...
+
+    @overload
+    def on_recv(
+        self,
+        callback: Callable[[list[pyomq.Frame]], object] | None,
+        copy: Literal[False],
+    ) -> None: ...
+
+    @overload
+    def on_recv(
+        self,
+        callback: Callable[[list[bytes] | list[pyomq.Frame]], object] | None,
+        copy: bool = True,
+    ) -> None: ...
+
+    def on_recv(
+        self, callback: Callable[[Any], object] | None, copy: bool = True
+    ) -> None:
         """Set a callback to be invoked when messages are received."""
         self._recv_callback = callback
         self._recv_copy = copy
@@ -56,7 +86,7 @@ class ZMQStream:
         else:
             self._stop_watching()
 
-    def on_send(self, callback: Callable[[Any, Any | None], Any] | None) -> None:
+    def on_send(self, callback: SendCallback | None) -> None:
         """Set a callback to be invoked when sends complete."""
         self._send_callback = callback
 
@@ -74,13 +104,15 @@ class ZMQStream:
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-        callback: Callable[[Any, Any], Any] | None = None,
+        callback: SendCallback | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> pyomq.MessageTracker | None:
         """Send a message."""
         result = self.socket.send(msg, flags=flags, copy=copy, track=track)
-        if self._send_callback:
-            self._send_callback(msg, None)
+        if callback is None:
+            callback = self._send_callback
+        if callback is not None:
+            callback([msg], result)
         return result
 
     def send_multipart(
@@ -89,18 +121,22 @@ class ZMQStream:
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-        callback: Callable[[Any, Any], Any] | None = None,
+        callback: SendCallback | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> pyomq.MessageTracker | None:
         """Send a multipart message."""
+        if callback is None:
+            callback = self._send_callback
+        # Materialize one-shot iterables only when a callback needs them too.
+        callback_parts = None if callback is None else list(msg_list)
         result = self.socket.send_multipart(
-            msg_list,
+            msg_list if callback_parts is None else callback_parts,
             flags=flags,
             copy=copy,
             track=track,
         )
-        if self._send_callback:
-            self._send_callback(msg_list, None)
+        if callback is not None and callback_parts is not None:
+            callback(callback_parts, result)
         return result
 
     def flush(self, flag: int = 3, limit: int | None = None) -> None:
@@ -148,7 +184,7 @@ class ZMQStream:
             if self._closed or self._watching:
                 return
             try:
-                io_loop.add_handler(fd, handler, _get_IOLoop().READ)  # type: ignore[ty:unresolved-attribute]
+                io_loop.add_handler(fd, handler, _get_IOLoop().READ)
                 self._watching = True
             except Exception:  # noqa S110
                 pass
@@ -175,11 +211,23 @@ class ZMQStream:
         self._closed = True
         self._stop_watching()
 
-    def setsockopt(self, opt: int, value: Any) -> Any:
+    def setsockopt(self, opt: int, value: int | bytes) -> None:
         """Set a socket option."""
         return self.socket.setsockopt(opt, value)
 
-    def getsockopt(self, opt: int) -> Any:
+    @overload
+    def getsockopt(self, opt: _BytesOption) -> bytes: ...
+
+    @overload
+    def getsockopt(self, opt: _IntOption) -> int: ...
+
+    @overload
+    def getsockopt(self, opt: Literal[32]) -> bytes | None: ...
+
+    @overload
+    def getsockopt(self, opt: int) -> int | bytes | None: ...
+
+    def getsockopt(self, opt: int) -> int | bytes | None:
         """Get a socket option."""
         return self.socket.getsockopt(opt)
 

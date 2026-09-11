@@ -300,7 +300,7 @@ def test_send_multipart_accepts_buffer_parts(tcp_endpoint):
         ctx.term()
 
 
-def test_send_accepts_noncontiguous_numpy_array_copy_false(tcp_endpoint):
+def test_send_rejects_noncontiguous_numpy_array_copy_false(tcp_endpoint):
     np = pytest.importorskip("numpy")
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
@@ -309,8 +309,8 @@ def test_send_accepts_noncontiguous_numpy_array_copy_false(tcp_endpoint):
         ep = pull.bind(tcp_endpoint)
         push.connect(ep)
         data = np.arange(16, dtype=np.uint8)[::2]
-        push.send(data, copy=False)
-        assert pull.recv() == data.tobytes()
+        with pytest.raises(BufferError):
+            push.send(data, copy=False)
     finally:
         push.close()
         pull.close()
@@ -349,7 +349,7 @@ def test_copy_false_send_accepted():
         ctx.term()
 
 
-def test_track_true_send_returns_tracker():
+def test_track_true_copied_send_returns_none():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
@@ -357,7 +357,7 @@ def test_track_true_send_returns_tracker():
         ep = pull.bind("tcp://127.0.0.1:0")
         push.connect(ep)
         tracker = push.send(b"hello", track=True)
-        assert isinstance(tracker, zmq.MessageTracker)
+        assert tracker is None
         assert pull.recv() == b"hello"
     finally:
         push.close()
